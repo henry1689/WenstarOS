@@ -18,11 +18,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from channels import create_all_objective_channels, ObjectiveResult
+# 确保可以从 domain_yaoguang 目录导入 channels
+_PARENT = Path(__file__).resolve().parent.parent
+if str(_PARENT) not in sys.path:
+    sys.path.insert(0, str(_PARENT))
+
+from domain_yaoguang.channels import create_all_objective_channels, ObjectiveResult
 
 
 # ---------------------------------------------------------------------------

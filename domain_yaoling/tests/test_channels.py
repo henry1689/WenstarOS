@@ -10,7 +10,7 @@ _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
     sys.path.insert(0, str(_PARENT))
 
-from channels import create_all_channels, SignalInput
+from domain_yaoling.channels import create_all_channels, SignalInput
 
 
 def test_all_channels_instantiate():

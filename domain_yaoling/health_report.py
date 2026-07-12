@@ -8,9 +8,9 @@ import json, sys, os
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
-from channels import create_all_channels, SignalInput
-from safety.threshold_registry import get_threshold, ThresholdLevel
-from safety.guard_evaluator import GuardAction, evaluate_dimension, evaluate_d32_vital_sign
+from domain_yaoling.channels import create_all_channels, SignalInput
+from domain_yaoling.safety.threshold_registry import get_threshold, ThresholdLevel
+from domain_yaoling.safety.guard_evaluator import GuardAction, evaluate_dimension, evaluate_d32_vital_sign
 
 # ── 采样场景 ──
 SCENARIOS = [

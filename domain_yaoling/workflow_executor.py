@@ -13,22 +13,28 @@ workflow_executor.py — 瑶灵工作流执行器
 from __future__ import annotations
 
 import json
+import sys
 import time
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from channels import create_all_channels, SignalInput, get_channel
-from channels.base_channel import SensationResult, OrganState, HealthLevel, Intensity
-from safety.threshold_registry import THRESHOLD_REGISTRY, D32_VITAL_THRESHOLDS, ThresholdLevel
-from safety.guard_evaluator import (
+_SELF = Path(__file__).resolve()
+_PARENT = _SELF.parent.parent
+if str(_PARENT) not in sys.path:
+    sys.path.insert(0, str(_PARENT))
+
+from domain_yaoling.channels import create_all_channels, SignalInput, get_channel
+from domain_yaoling.channels.base_channel import SensationResult, OrganState, HealthLevel, Intensity
+from domain_yaoling.safety.threshold_registry import THRESHOLD_REGISTRY, D32_VITAL_THRESHOLDS, ThresholdLevel
+from domain_yaoling.safety.guard_evaluator import (
     evaluate_dimension, evaluate_d32_vital_sign,
     evaluate_all_dimensions, build_reject_report,
     SafetyVerdict, Violation, GuardAction,
 )
-from codec.sensation_encoder import SensationEncoder, SpineSnapshot, to_protobuf_dict
-from codec.sensation_decoder import SensationDecoder
+from domain_yaoling.codec.sensation_encoder import SensationEncoder, SpineSnapshot, to_protobuf_dict
+from domain_yaoling.codec.sensation_decoder import SensationDecoder
 
 # ---------------------------------------------------------------------------
 # 共享状态 Key 常量

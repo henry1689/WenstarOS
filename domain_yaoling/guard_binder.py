@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from safety.guard_evaluator import GuardAction, evaluate_dimension, evaluate_d32_vital_sign
+from domain_yaoling.safety.guard_evaluator import GuardAction, evaluate_dimension, evaluate_d32_vital_sign
 
 
 # ─── checker 回调签名 ───

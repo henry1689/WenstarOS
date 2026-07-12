@@ -10,8 +10,8 @@ _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
     sys.path.insert(0, str(_PARENT))
 
-from safety.threshold_registry import THRESHOLD_REGISTRY, D32_VITAL_THRESHOLDS, get_threshold, get_vital_threshold, ThresholdLevel
-from safety.guard_evaluator import evaluate_dimension, evaluate_d32_vital_sign, evaluate_all_dimensions, build_reject_report, GuardAction
+from domain_yaoling.safety.threshold_registry import THRESHOLD_REGISTRY, D32_VITAL_THRESHOLDS, get_threshold, get_vital_threshold, ThresholdLevel
+from domain_yaoling.safety.guard_evaluator import evaluate_dimension, evaluate_d32_vital_sign, evaluate_all_dimensions, build_reject_report, GuardAction
 
 
 def test_all_32_dimensions_have_thresholds():

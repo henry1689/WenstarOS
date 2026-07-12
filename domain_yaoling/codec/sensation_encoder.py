@@ -20,7 +20,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
-from channels.base_channel import SensationResult, HealthLevel, Intensity, ChannelCategory
+from domain_yaoling.channels.base_channel import SensationResult, HealthLevel, Intensity, ChannelCategory
 
 
 # ---------------------------------------------------------------------------

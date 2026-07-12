@@ -23,7 +23,7 @@ async def handle_command(msg: dict) -> dict:
     logger.info("收到跨域指令: %s → %s", cmd, payload.get("workflow_id", "?"))
 
     try:
-        from workflow_executor import run_pipeline as _run_yaoling_pipeline
+        from domain_yaoling.workflow_executor import run_pipeline as _run_yaoling_pipeline
 
         result = _run_yaoling_pipeline(
             raw_text=payload.get("task", payload.get("raw_input_text", "")),

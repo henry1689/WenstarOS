@@ -14,7 +14,7 @@ if str(_PARENT) not in sys.path:
     sys.path.insert(0, str(_PARENT))
 
 from common.base_mcp_harris import GlobalBusTCPClient
-from workflow_executor import YaoguangWorkflowExecutor
+from domain_yaoguang.workflow_executor import YaoguangWorkflowExecutor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-5s | %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("yaoguang.bus")

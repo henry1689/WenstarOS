@@ -2521,37 +2521,68 @@ async def _generate_config_report(node: AgentNode, ctx: WorkflowContextV2) -> di
 # ═══════════════════════════════════════════════════════════════
 
 async def _scan_file_handles(node: AgentNode, ctx: WorkflowContextV2) -> dict:
-    """n1_scan_file_handles — 文件句柄泄露扫描。"""
+    """n1_scan_file_handles — 文件句柄泄露扫描（上下文感知，过滤已知安全模式）。"""
     project_root = ctx.constraints.get("project_root", ".")
     root = Path(project_root).resolve()
-
-    FILE_LEAK_PATTERNS = [
-        (r'\bopen\s*\([^)]+\)(?!.*\bwith\b)', 'open() 未使用 with 语句'),
-        (r'(?<!with\s)open\s*\([^)]+\)(?!.*\.close\s*\()', 'open() 后未显式 close()'),
-        (r'\bsocket\.socket\s*\(', 'socket 未关闭风险'),
-        (r'\.write\s*\([^)]+\)(?!.*\.flush\s*\()', 'write() 后未 flush()'),
-        (r'\bPopen\s*\(', 'subprocess.Popen 未等待/关闭'),
-    ]
 
     findings: List[dict] = []
     for py_file in root.rglob("*.py"):
         rel = str(py_file.relative_to(root)).replace("\\", "/")
-        if any(p in rel for p in ("__pycache__", ".git", "node_modules", ".venv", "dist", "tests", "executor/")):
+        if any(p in rel for p in ("__pycache__", ".git", "node_modules", ".venv", "dist", "tests", "executor/", "validator/")):
             continue
         try:
             content = py_file.read_text(encoding="utf-8")
-            for lineno, line in enumerate(content.split("\n"), 1):
-                for pattern, desc in FILE_LEAK_PATTERNS:
-                    if re.search(pattern, line):
-                        findings.append({"file": rel, "line": lineno, "issue": desc, "snippet": line.strip()[:100]})
+            lines = content.split("\n")
+            # 预处理: 标记哪些行在 docstring 内
+            in_docstring = False
+            docstring_lines: set = set()
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.count('"""') >= 2 or stripped.count("'''") >= 2:
+                    in_docstring = not in_docstring
+                    docstring_lines.add(i)
+                elif stripped.startswith('"""') or stripped.startswith("'''") or stripped.endswith('"""') or stripped.endswith("'''"):
+                    in_docstring = not in_docstring
+                    docstring_lines.add(i)
+                if in_docstring:
+                    docstring_lines.add(i)
+
+            for lineno_minus1, line in enumerate(lines):
+                lineno = lineno_minus1 + 1
+                if lineno_minus1 in docstring_lines:
+                    continue  # 跳过文档字符串
+
+                # open() 检查: 验证是否在 with 块内
+                if re.search(r'\bopen\s*\(', line) and 'with' not in line:
+                    # 检查前一行的 with open
+                    prev_line = lines[lineno_minus1 - 1].strip() if lineno_minus1 > 0 else ""
+                    if 'with open' not in prev_line and 'with open(' not in prev_line:
+                        findings.append({"file": rel, "line": lineno, "issue": "open() 未使用 with 语句", "snippet": line.strip()[:100]})
+
+                # write() 检查: 验证后续行有 drain/flush
+                if re.search(r'\.write\s*\(', line) and 'flush' not in line and 'drain' not in line:
+                    # 检查后续 3 行是否有 drain 或 flush
+                    next_block = "\n".join(lines[lineno_minus1:min(lineno_minus1+4, len(lines))])
+                    if 'flush' not in next_block and 'drain' not in next_block:
+                        findings.append({"file": rel, "line": lineno, "issue": "write() 后未 flush()", "snippet": line.strip()[:100]})
+
+                # socket: 永远可疑
+                if re.search(r'\bsocket\.socket\s*\(', line):
+                    findings.append({"file": rel, "line": lineno, "issue": "socket 未关闭风险", "snippet": line.strip()[:100]})
+
+                # Popen: 永远可疑
+                if re.search(r'\bPopen\s*\(', line):
+                    findings.append({"file": rel, "line": lineno, "issue": "Popen 未等待/关闭", "snippet": line.strip()[:100]})
+
         except Exception:
             continue
 
     return {
         "status": "ok",
-        "files_scanned": "(static scan of *.py)",
+        "files_scanned": "(static scan of *.py, docstring-aware)",
         "leaks_found": len(findings),
         "findings": findings[:20],
+        "false_positives_filtered": "docstrings, with-open context, write+drain patterns",
     }
 
 
@@ -2600,14 +2631,25 @@ async def _detect_leaks(node: AgentNode, ctx: WorkflowContextV2) -> dict:
     unmatched_opens: List[dict] = []
     for py_file in root.rglob("*.py"):
         rel = str(py_file.relative_to(root)).replace("\\", "/")
-        if any(p in rel for p in ("__pycache__", ".git", "node_modules", ".venv", "dist", "tests", "executor/")):
+        if any(p in rel for p in ("__pycache__", ".git", "node_modules", ".venv", "dist", "tests", "executor/", "validator/")):
             continue
         try:
             content = py_file.read_text(encoding="utf-8")
-            opens = len(re.findall(r'\bopen\s*\(', content))
-            closes = len(re.findall(r'\.close\s*\(', content))
-            withs = len(re.findall(r'\bwith\s+open\s*\(', content))
-            # 有 open 但 close+with 不够 → 可能泄露
+            # 过滤 docstring 内的 open() — 只计实际代码
+            lines = content.split("\n")
+            code_only = []
+            in_ds = False
+            for line in lines:
+                s = line.strip()
+                if s.count('"""') >= 2 or s.count("'''") >= 2:
+                    in_ds = not in_ds; code_only.append(""); continue
+                elif s.startswith('"""') or s.startswith("'''") or s.endswith('"""') or s.endswith("'''"):
+                    in_ds = not in_ds; code_only.append(""); continue
+                code_only.append(line if not in_ds else "")
+            clean = "\n".join(code_only)
+            opens = len(re.findall(r'\bopen\s*\(', clean))
+            closes = len(re.findall(r'\.close\s*\(', clean))
+            withs = len(re.findall(r'\bwith\s+open\s*\(', clean))
             if opens > (closes + withs):
                 unmatched_opens.append({"file": rel, "opens": opens, "closes": closes, "withs": withs})
         except Exception:
@@ -2624,29 +2666,40 @@ async def _detect_leaks(node: AgentNode, ctx: WorkflowContextV2) -> dict:
 
 
 async def _memory_estimate(node: AgentNode, ctx: WorkflowContextV2) -> dict:
-    """n4_memory_estimate — 内存风险静态估计。"""
+    """n4_memory_estimate — 内存风险静态估计（上下文感知，过滤 with-open 安全模式）。"""
     project_root = ctx.constraints.get("project_root", ".")
     root = Path(project_root).resolve()
-
-    MEMORY_PATTERNS = [
-        (r'\[\s*\]\s*\*\s*\d{4,}', '大数组预分配 (>=1000)'),
-        (r'new\s+Array\s*\(\s*\d{3,}\s*\)', 'new Array(大容量)'),
-        (r'\.read\(\)(?!\s*\[)', 'read() 全量载入内存'),
-        (r'readFileSync\s*\(', '同步大文件读取可能阻塞'),
-        (r'JSON\.parse\s*\(\s*fs\.readFileSync', '大 JSON 全量解析'),
-    ]
 
     findings: List[dict] = []
     for src_file in list(root.rglob("*.py")) + list(root.rglob("*.ts")) + list(root.rglob("*.js")):
         rel = str(src_file.relative_to(root)).replace("\\", "/")
-        if any(p in rel for p in ("__pycache__", "node_modules", ".venv", "dist", "tests")):
+        if any(p in rel for p in ("__pycache__", "node_modules", ".venv", "dist", "tests", "executor/")):
             continue
         try:
             content = src_file.read_text(encoding="utf-8")
-            for lineno, line in enumerate(content.split("\n"), 1):
-                for pattern, desc in MEMORY_PATTERNS:
-                    if re.search(pattern, line):
-                        findings.append({"file": rel, "line": lineno, "issue": desc, "snippet": line.strip()[:100]})
+            lines = content.split("\n")
+            in_ds = False; ds_set = set()
+            for j, l in enumerate(lines):
+                s = l.strip()
+                if s.count('"""') >= 2 or s.count("'''") >= 2: in_ds = not in_ds; ds_set.add(j)
+                elif s.startswith('"""') or s.startswith("'''") or s.endswith('"""') or s.endswith("'''"): in_ds = not in_ds; ds_set.add(j)
+                if in_ds: ds_set.add(j)
+            for i, line in enumerate(lines):
+                if i in ds_set: continue
+                lineno = i + 1
+                # read() 全量: 跳过 with-open 安全块
+                if re.search(r'\.read\(\)(?!\s*\[)', line):
+                    # 检查前 3 行是否有 with open
+                    prev = "\n".join(lines[max(0,i-3):i+1])
+                    if 'with open' not in prev and 'with open(' not in prev:
+                        findings.append({"file": rel, "line": lineno, "issue": "read() 全量载入内存", "snippet": line.strip()[:100]})
+                # 大数组: 始终标记
+                elif re.search(r'\[\s*\]\s*\*\s*\d{4,}', line):
+                    findings.append({"file": rel, "line": lineno, "issue": "大数组预分配 (>=1000)", "snippet": line.strip()[:100]})
+                elif re.search(r'new\s+Array\s*\(\s*\d{3,}\s*\)', line):
+                    findings.append({"file": rel, "line": lineno, "issue": "new Array(大容量)", "snippet": line.strip()[:100]})
+                elif re.search(r'readFileSync\s*\(', line):
+                    findings.append({"file": rel, "line": lineno, "issue": "同步大文件读取可能阻塞", "snippet": line.strip()[:100]})
         except Exception:
             continue
 
@@ -2654,6 +2707,7 @@ async def _memory_estimate(node: AgentNode, ctx: WorkflowContextV2) -> dict:
         "status": "ok",
         "memory_risks": len(findings),
         "findings": findings[:20],
+        "false_positives_filtered": "with-open read(), 文件加载器模式",
     }
 
 

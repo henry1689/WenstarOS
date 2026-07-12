@@ -1,0 +1,90 @@
+# wf_resource_scan — 天权资源泄露扫描流水线 V2.0
+# ================================================================
+# 路由标签: resource_scan | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_resource_scan
+version: "2.0"
+description: >
+  天权资源泄露扫描流水线 — 检测未关闭文件句柄/未清理定时器/大对象引用。
+  三阶段: 资源扫描 → 泄露分析 → 安全报告
+mode: strict
+domain: tianquan
+route_tag: resource_scan
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, project_root]
+  properties:
+    dna_root_id: { type: string }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    project_root: { type: string }
+    check_files: { type: boolean, default: true }
+    check_timers: { type: boolean, default: true }
+    check_memory: { type: boolean, default: true }
+
+global_guard:
+  guard_name: tianquan_resource_preflight
+  rules:
+    - { name: project_root_valid, priority: 0 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7", priority: 2 }
+
+phases:
+  - phase_id: p1_scan
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "RESOURCE_SCAN"
+    nodes:
+      - { node_id: n1_scan_file_handles, agent_type: tool, timeout_seconds: 120,
+          prompt_template: "文件句柄扫描: 检测 open() 无 with/close(), 未关闭的 socket/pipe, read/write 后未 flush。" }
+      - { node_id: n2_scan_timers, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "定时器泄露扫描: setInterval 无 clearInterval, setTimeout 无限递归, addEventListener 无 removeEventListener。" }
+    exit_guard:
+      guard_name: p1_scan_gate
+      rules:
+        - { name: scan_complete, description: 资源扫描必须完成, priority: 1 }
+
+  - phase_id: p2_analyze
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "LEAK_ANALYZE"
+    nodes:
+      - { node_id: n3_detect_leaks, agent_type: tool, timeout_seconds: 90,
+          prompt_template: "泄露分析: 匹配 open→close 配对, 检测全局变量累积, 标记高风险泄露点。" }
+      - { node_id: n4_memory_estimate, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "内存估计: 大数组/大对象分配扫描, 闭包引用检测, 循环引用检测。" }
+    exit_guard:
+      guard_name: p2_analyze_gate
+      rules:
+        - { name: leaks_analyzed, description: 泄露分析必须完成, priority: 1 }
+
+  - phase_id: p3_report
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "RESOURCE_REPORT"
+    nodes:
+      - { node_id: n5_generate_resource_report, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "生成资源健康报告: 文件句柄/定时器/内存 三维度评分 + 修复建议。" }
+    exit_guard:
+      guard_name: p3_report_gate
+      rules:
+        - { name: report_generated, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: resource_scan
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 600
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC

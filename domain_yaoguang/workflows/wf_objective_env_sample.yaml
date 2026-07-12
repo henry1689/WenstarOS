@@ -1,0 +1,141 @@
+# 瑶光 · 客观环境采样工作流
+# =============================
+# 对应白皮书 §2.2 瑶光六层架构 — 第一层「自然时空」
+# 采集 D8/D24/D25/D26 四维客观环境参数，输出 6D 感知快照
+#
+# 铁律：仅输出纯量化客观参数，无主观情绪体感
+
+workflow_id: wf_objective_env_sample
+version: "1.0"
+mode: strict
+description: >
+  瑶光客观环境采样 — 采集 D8(五感环境)/D24(公共场地)/D25(时空距离)/D26(气象节律)
+  四维客观环境参数，经归一化与感知滤波后输出标准化 6D 感知快照。
+  输出: 温度/噪音/光照/人流密度/时间紧迫度/昼夜节律相位
+
+constraints_schema:
+  type: object
+  required: [location_fingerprint, timestamp_ms]
+  properties:
+    location_fingerprint:
+      type: string
+      description: "场景区位指纹，格式 {scene_type}:{scene_id}:{sub_zone}"
+    timestamp_ms:
+      type: integer
+      description: "采样时间戳毫秒"
+    scene_type:
+      type: string
+      enum: [home, office, outdoor, public]
+      description: "场景类型枚举"
+    weather_override:
+      type: object
+      description: "手动覆写气象参数（缺省则从季节+地域规则演算）"
+      properties:
+        temperature_c:
+          type: number
+        weather_type:
+          type: string
+          enum: [sunny, cloudy, rainy, snowy, windy]
+
+# ---------------------------------------------------------------------------
+phases:
+
+  - phase_id: p1_collect_raw
+    parallel: true
+    description: "并行采集四维原始环境信号"
+    nodes:
+
+      - node_id: n1_d8_sensory
+        agent_type: tool
+        prompt_template: >
+          采集 D8 五感环境客观参数：
+          - 体表温度 (℃)，正常区间 -20 ~ 50
+          - 环境噪音 (dB)，正常区间 20 ~ 100
+          - 光照照度 (lux)，正常区间 0 ~ 100000
+          - 空气质量指数 (AQI)
+          场景: {{ constraints.location_fingerprint }}
+          输出为 JSON: { temperature_c, noise_db, light_lux, aqi }
+        timeout_seconds: 30
+
+      - node_id: n2_d24_public
+        agent_type: tool
+        prompt_template: >
+          采集 D24 公共场地客观参数：
+          - 人群密度 (0.0 ~ 1.0, 0=无人 1=极度拥挤)
+          - 环境噪音 (dB)
+          - 交感神经兴奋度客观基线 (正常 35%)
+          场景类型: {{ constraints.scene_type }}
+          区位: {{ constraints.location_fingerprint }}
+          输出为 JSON: { crowd_density, noise_db, nerve_baseline }
+        timeout_seconds: 30
+
+      - node_id: n3_d25_spacetime
+        agent_type: tool
+        prompt_template: >
+          采集 D25 时空距离客观参数：
+          - 行程密度 (当日已排行程数)
+          - 最近通勤时长 (min)
+          - 缓冲空闲时间 (min)
+          - 时间紧迫度 (0.0 ~ 1.0, 0=完全宽松 1=极度紧迫)
+          时间戳: {{ constraints.timestamp_ms }}
+          输出为 JSON: { trip_count, commute_min, buffer_min, urgency }
+        timeout_seconds: 30
+
+      - node_id: n4_d26_climate
+        agent_type: tool
+        prompt_template: >
+          采集 D26 气象节律客观参数：
+          - 季节相位 (0.0=春分 1.0=夏至 2.0=秋分 3.0=冬至)
+          - 当前气温 (℃)
+          - 日照时长 (h)
+          - 天气类型 (sunny/cloudy/rainy/snowy/windy)
+          - 昼夜节律偏移量 (0.0=正常 -1.0=严重颠倒)
+          气象覆写: {{ constraints.weather_override }}
+          输出为 JSON: { season_phase, temperature_c, sunlight_h, weather, circadian_shift }
+        timeout_seconds: 30
+
+# ---------------------------------------------------------------------------
+
+  - phase_id: p2_normalize
+    parallel: false
+    description: "归一化与感知滤波 — 剔除传感器噪声，输出标准化客观参数包"
+    nodes:
+
+      - node_id: n5_filter_and_pack
+        agent_type: tool
+        prompt_template: >
+          对 p1 采集的四维原始数据进行感知滤波与归一化：
+
+          1. 剔除超出物理极限的传感器异常值
+          2. 温度归一化到标准 -20~50℃ 区间
+          3. 噪音归一化到 dB 标准 (20~100)
+          4. 照度归一化到 lux 标准 (0~100000)
+          5. 人群密度归一化到 0.0~1.0
+          6. 时间紧迫度归一化到 0.0~1.0
+          7. 组装标准化 6D 客观感知快照
+
+          D8 原始:  {{ artifacts.n1_d8_sensory_result }}
+          D24 原始: {{ artifacts.n2_d24_public_result }}
+          D25 原始: {{ artifacts.n3_d25_spacetime_result }}
+          D26 原始: {{ artifacts.n4_d26_climate_result }}
+
+          输出为 JSON:
+          {
+            "d8_env_sensory":   { temperature_c, noise_db, light_lux, aqi },
+            "d24_public_space": { crowd_density, noise_db, nerve_baseline },
+            "d25_spacetime":    { trip_count, commute_min, buffer_min, urgency },
+            "d26_climate":      { season_phase, temperature_c, sunlight_h, weather, circadian_shift },
+            "snapshot_6d":      [temperature_c, noise_db, light_lux, crowd_density, urgency, circadian_shift]
+          }
+        timeout_seconds: 60
+
+# ---------------------------------------------------------------------------
+global_guard:
+  guard_name: yaoguang_env_guard
+  rules:
+    - name: no_subjective_output
+      description: "瑶光铁律 — 输出中禁止出现任何主观情绪词汇（快乐/痛苦/焦虑/舒服/难受 等）"
+      priority: 1
+    - name: physical_range_check
+      description: "所有输出参数必须在物理学可行区间内（如温度 > -273.15℃）"
+      priority: 10

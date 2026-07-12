@@ -1,0 +1,99 @@
+// spine.proto — WenStar OS 32D 海胆语义快照
+// ================================================================
+// 适配: DNA V2.0 + 大一统架构 V1.0
+// 用途: 瑶灵 32D 体感快照 / 瑶光 32D 环境快照 → 太虚境统一编码
+// 跨语言: Python (wenstar_os) ↔ TypeScript (wenstar-cc) 共享
+//
+// 🔴 字段编号永久锁定，永不修改 / 删除 / 重排
+// 🔴 新增字段只能追加到末尾，使用新的连续编号
+
+syntax = "proto3";
+
+package wenstar.spine;
+
+// ── 单维度条目 (对应 state_spines 的一行) ───────────────────
+message SpineEntry {
+  uint32 dim_id        = 1;   // 1-32, CHECK(dimension_id BETWEEN 1 AND 32)
+  string dim_key       = 2;   // 维度英文键名, e.g. "muscle_load"
+  float  value_raw     = 3;   // 主观体感值 [-1.0, 1.0], float32 精度
+  string intensity     = 4;   // low | medium | high | extreme
+  string sensation_label = 5; // 中文体感描述
+
+  // 医学对标
+  string medical_metric_name = 10;  // 临床指标名称
+  float  medical_value       = 11;  // 折算后的医学数值
+  string medical_unit        = 12;  // 单位
+  float  medical_baseline    = 13;  // 瑶光健康零点
+  float  deviation           = 14;  // 相对基准偏移
+
+  // 器官状态
+  string organ_name          = 20;  // 响应器官
+  map<string, float> organ_metrics = 21;  // 量化指标
+
+  // 证据
+  string evidence_text   = 30;      // 触发此体感的输入原文片段
+  repeated uint32 sibling_dims = 31;  // 同象限兄弟维度编号
+}
+
+// ── 完整 32D 海胆快照 ───────────────────────────────────────
+message SpineSnapshot {
+  string global_uid              = 1;   // 双链唯一绑定锚点
+  string dna_root_id             = 2;   // 向后兼容: 旧版根 ID
+  string dialog_group_id         = 3;   // 对话藤蔓组 ID
+  string location_fingerprint    = 4;   // 128-bit 区位指纹 (hex)
+  string timestamp               = 5;   // ISO8601 快照时间戳
+  repeated string scene_tags     = 6;   // 场景标签
+
+  // 32 个维度条目
+  repeated SpineEntry entries    = 10;
+
+  // 跨维度一致性告警
+  repeated CrossDimWarning cross_dim_warnings = 20;
+
+  // 安全校验结果
+  SafetyVerdict safety_verdict   = 30;
+
+  // D32 核心生命体征
+  VitalSigns vital_signs         = 40;
+  string overall_health_level    = 41;  // healthy | sub_healthy | risk | danger
+  float  overall_deviation       = 42;
+
+  // 完整性校验
+  string crc32                   = 50;
+  string encoder_version         = 51;
+}
+
+// ── 跨维度一致性告警 ────────────────────────────────────────
+message CrossDimWarning {
+  string description = 1;
+  repeated uint32 related_dims = 2;
+}
+
+// ── 安全校验结果 ─────────────────────────────────────────────
+message SafetyVerdict {
+  bool   passed            = 1;
+  uint32 danger_count      = 2;
+  uint32 risk_count        = 3;
+  string overall_level     = 4;
+  string reject_reason     = 5;
+  repeated Violation violations = 6;
+}
+
+message Violation {
+  uint32 dim_id            = 1;
+  string dim_key           = 2;
+  string medical_metric    = 3;
+  float  current_value     = 4;
+  string threshold_level   = 5;  // healthy | sub_healthy | risk | danger
+  string threshold_range   = 6;
+  string tip               = 7;
+}
+
+// ── D32 核心生命体征 ─────────────────────────────────────────
+message VitalSigns {
+  float heart_rate         = 1;   // 静息心率 (次/分)
+  float blood_pressure_sys = 2;   // 收缩压 (mmHg)
+  float blood_pressure_dia = 3;   // 舒张压 (mmHg)
+  float cortisol_avg       = 4;   // 全天平均皮质醇 (μg/dL)
+  float pleasure_hormone_avg = 5; // 综合愉悦激素均值 (pg/mL)
+}

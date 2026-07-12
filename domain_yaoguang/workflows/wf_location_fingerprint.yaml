@@ -1,0 +1,109 @@
+# 瑶光 · 空间区位指纹工作流
+# =============================
+# 对应白皮书 §2.2 瑶光六层架构 — 第二层「空间建模」
+# 将场景上下文解析为标准化 location_fingerprint
+#
+# 格式规范（蓝皮书 §4.3）: {scene_type}:{scene_id}:{sub_zone}
+
+workflow_id: wf_location_fingerprint
+version: "1.0"
+mode: strict
+description: >
+  瑶光空间建模 — 根据输入场景上下文生成标准化区位指纹。
+  格式: {scene_type}:{scene_id}:{sub_zone}
+  场景类型枚举: home(私人居所) / office(工作场所) / outdoor(户外自然) / public(公共设施)
+  输出: location_fingerprint 字符串 + 场景元数据(面积/人流/噪音/隐私等级)
+
+constraints_schema:
+  type: object
+  required: [scene_context]
+  properties:
+    scene_context:
+      type: string
+      description: "场景原始描述文本，如 '卧室靠窗的书桌旁'"
+    known_scene_id:
+      type: string
+      description: "已知场景 ID（可选，缺省则自动推断）"
+    known_sub_zone:
+      type: string
+      description: "已知子区域（可选，缺省为 default）"
+
+# ---------------------------------------------------------------------------
+phases:
+
+  - phase_id: p1_classify
+    parallel: false
+    description: "场景类型识别与 scene_id 推断"
+    nodes:
+
+      - node_id: n1_infer_scene
+        agent_type: tool
+        prompt_template: >
+          从场景上下文推断 scene_type 和 scene_id：
+
+          scene_type 判定规则:
+            home:    卧室/客厅/厨房/浴室/阳台/书房/健身房 等私人居所空间
+            office:  工位/会议室/厂区/车间/实验室/医院诊室 等工作场所
+            outdoor: 公园/步道/山区/海滩/街道/广场 等户外自然或城市开放空间
+            public:  商场/车站/机场/餐厅/咖啡馆/图书馆/电影院 等公共设施
+
+          scene_id 命名规则:
+            取场景的稳定唯一标识，如:
+            home → 具体房间名 (livingroom/bedroom/kitchen/bathroom)
+            office → 楼栋+楼层+工位号 (floor3_desk_a2)
+            outdoor → 地名+类型 (central_park/lakeside_trail)
+            public → 设施名 (grand_central_station/starbucks_xidan)
+
+          场景描述: {{ constraints.scene_context }}
+          已知场景 ID: {{ constraints.known_scene_id }}
+
+          输出为 JSON:
+          { scene_type, scene_id }
+        timeout_seconds: 30
+
+# ---------------------------------------------------------------------------
+
+  - phase_id: p2_encode_fingerprint
+    parallel: false
+    description: "编码标准化区位指纹 + 场景元数据"
+    nodes:
+
+      - node_id: n2_assemble
+        agent_type: tool
+        prompt_template: >
+          根据分类结果生成标准化 location_fingerprint：
+
+          scene_type: {{ artifacts.n1_infer_scene_result.scene_type }}
+          scene_id:   {{ artifacts.n1_infer_scene_result.scene_id }}
+          sub_zone:   {{ constraints.known_sub_zone }}
+
+          编译为: "{scene_type}:{scene_id}:{sub_zone}"
+
+          同时输出场景元数据（基于 scene_type 的默认规则估算）：
+            home:    面积 15-60 m², 人流 0.0-0.3, 噪音 25-45 dB, 隐私=1(私密)
+            office:  面积 20-200 m², 人流 0.3-0.7, 噪音 40-65 dB, 隐私=2(半开放)
+            outdoor: 面积 500+ m², 人流 0.1-0.8, 噪音 35-75 dB, 隐私=3(公共)
+            public:  面积 200-5000 m², 人流 0.5-1.0, 噪音 50-80 dB, 隐私=3(公共)
+
+          输出为 JSON:
+          {
+            "location_fingerprint": "home:livingroom:sofa",
+            "scene_type": "home",
+            "scene_id": "livingroom",
+            "sub_zone": "sofa",
+            "metadata": { area_m2, crowd_baseline, noise_baseline_db, privacy_level }
+          }
+        timeout_seconds: 30
+
+# ---------------------------------------------------------------------------
+global_guard:
+  guard_name: fingerprint_format_guard
+  rules:
+    - name: format_regex
+      description: >
+        location_fingerprint 必须符合 "{scene_type}:{scene_id}:{sub_zone}" 格式，
+        三部分均非空、不含冒号外的特殊字符
+      priority: 1
+    - name: scene_type_enum
+      description: "scene_type 必须在 [home, office, outdoor, public] 枚举内"
+      priority: 2

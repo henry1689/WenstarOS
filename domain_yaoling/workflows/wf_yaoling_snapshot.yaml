@@ -1,0 +1,277 @@
+# wf_yaoling_snapshot — 瑶灵 32D 全身状态快照发射
+# ================================================================
+# 规格依据: YAOLING_DOMAIN_SPEC.md §5.1 上行通道协议
+# 执行模式: STRICT
+# 触发条件: wf_sensation_pipeline 完成后调用，或天权主动请求
+# 输出: 完整的 32D 主观体感快照包（Protobuf 就绪），上传太虚境
+
+workflow_id: wf_yaoling_snapshot
+version: "1.0"
+description: >
+  瑶灵 32D 全身状态快照组装与发射 — 汇总 D1-D32 全部通道当前状态，
+  绑定 dna_root_id + location_fingerprint + 时间戳，
+  经 Protobuf 序列化后上传太虚境天权中枢。
+  单次交互仅生成一颗完整 32D 海胆快照（工程蓝皮书 §12.9）。
+mode: strict
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, channel_states]
+  properties:
+    dna_root_id:
+      type: string
+    location_fingerprint:
+      type: string
+    channel_states:
+      type: object
+      description: D1-D32 通道当前状态的完整字典
+    safety_verdict:
+      type: object
+      description: wf_safety_gate 输出的安全校验结果
+    scene_tags:
+      type: array
+      items: { type: string }
+    dialog_group_id:
+      type: string
+
+# ---------------------------------------------------------------------------
+# 全局守门器
+# ---------------------------------------------------------------------------
+global_guard:
+  guard_name: snapshot_preflight
+  rules:
+    - name: sensation_completed
+      description: 体感流水线必须已完成（channel_states 非空且覆盖 D1-D32）
+      priority: 0
+
+    - name: safety_gate_passed
+      description: 安全守门必须已通过（无 danger 级违规）
+      priority: 0
+
+    - name: dna_root_id_present
+      description: dna_root_id 必须存在
+      priority: 1
+
+    - name: location_fingerprint_present
+      description: location_fingerprint 必须存在
+      priority: 1
+
+    - name: no_dynamic_override
+      description: MH-3 瑶灵调度永久禁用动态 DAG
+      priority: 1
+
+    - name: single_snapshot_per_interaction
+      description: 单次交互仅允许一颗快照，检查是否已有同 dna_root_id 的快照发射记录
+      priority: 2
+
+# ---------------------------------------------------------------------------
+# 阶段 1: 全通道状态聚合
+# ---------------------------------------------------------------------------
+phases:
+  - phase_id: p1_aggregate_all_channels
+    parallel: false
+    entry_guard:
+      guard_name: p1_channel_count_check
+      rules:
+        - name: all_32_channels_present
+          description: channel_states 必须包含 D1-D32 全部 32 个键
+          priority: 1
+    nodes:
+      - node_id: n1_collect_channel_states
+        agent_type: tool
+        prompt_template: >
+          从 channel_states 中收集全部 32 维通道状态。
+          按五大类分组整理：
+          大类1(D1-D8): 肉身实体基底
+          大类2(D9-D14): 个体精神内核
+          大类3(D15-D20): 圈层人际羁绊
+          大类4(D21-D26): 时空环境感知
+          大类5(D27-D32): 动态生长耦合
+          检查每维必要字段: dim_id, dim_key, value_raw, intensity,
+          deviation, health_level, organ_state, evidence_text。
+          缺失字段标记并补默认值（value_raw=0, intensity=low, health_level=sub_healthy）。
+        timeout_seconds: 60
+
+      - node_id: n2_validate_cross_dimension_consistency
+        agent_type: tool
+        prompt_template: >
+          跨维度一致性校验：
+          - D4(皮质醇) 与 D11(恐惧倦怠) 应呈正相关——高皮质醇 + 低恐惧 = 不一致
+          - D4(多巴胺) 与 D10(成长驱动力) 应呈正相关——低多巴胺 + 高动力 = 不一致
+          - D12(催产素) 与 D15(伴侣依恋) 应呈正相关——低催产素 + 高依恋 = 不一致
+          - D32(心率/血压) 与 D4(皮质醇) 应呈正相关——高心率 + 低皮质醇 = 不一致
+          不一致的维度对标记 warning（非致命，但记录到快照中供天权参考）。
+          输出 inconsistency_warnings 列表。
+        timeout_seconds: 60
+        depends_on: [n1_collect_channel_states]
+
+      - node_id: n3_compute_d32_holistic_summary
+        agent_type: tool
+        prompt_template: >
+          计算 D32 全身统筹汇总（参照规范 §3.3）：
+          静息心率: 基于 D3(交感兴奋度) + D4(皮质醇) + D11(SAS) 的加权公式
+            HR = 66 + (交感兴奋度 - 0.35) * 60 + (皮质醇 - 14) * 1.5
+          血压: 基于 D3 + D4 + D1(乳酸) 的加权公式
+            收缩压 = 115 + (交感兴奋度 - 0.35) * 40 + (乳酸 - 1.0) * 8
+            舒张压 = 73 - (交感兴奋度 - 0.35) * 20 - (皮质醇 - 14) * 0.5
+          综合皮质醇均值: D4 皮质醇值直接映射
+          综合愉悦激素均值: (D4多巴胺 + D12催产素) / 2
+          整体健康等级: 取 D1-D31 中最低的 health_level
+          整体偏移: 取 D1-D31 偏移的加权平均
+          注意：以上公式为规则计算，禁止 LLM 直接生成浮点。
+        timeout_seconds: 60
+        depends_on: [n2_validate_cross_dimension_consistency]
+
+    exit_guard:
+      guard_name: p1_aggregation_complete
+      rules:
+        - name: d32_computed
+          description: D32 汇总必须已计算完成
+          priority: 1
+        - name: no_missing_dimension
+          description: 32 维缺一不可
+          priority: 1
+
+# ---------------------------------------------------------------------------
+# 阶段 2: 快照编码
+# ---------------------------------------------------------------------------
+  - phase_id: p2_encode_snapshot
+    parallel: false
+    entry_guard:
+      guard_name: p2_encode_preflight
+      rules:
+        - name: p1_all_passed
+          description: 阶段1必须全部完成
+          priority: 1
+    nodes:
+      - node_id: n4_build_snapshot_object
+        agent_type: tool
+        prompt_template: >
+          构建完整 32D 海胆快照对象：
+          {
+            "dna_root_id": "...",
+            "dialog_group_id": "...",
+            "location_fingerprint": "...",
+            "timestamp": "ISO8601",
+            "scene_tags": [...],
+            "dimensions": {
+              "d1": { dim_id: 1, dim_key: "muscle_load", category: "physical_body", ... },
+              "d2": { ... },
+              ...
+              "d32": { dim_id: 32, dim_key: "holistic_state", category: "dynamic_growth",
+                       vital_signs: { heart_rate, blood_pressure_sys, blood_pressure_dia,
+                                      cortisol_avg, pleasure_hormone_avg },
+                       overall_health_level, overall_deviation }
+            },
+            "cross_dimension_warnings": [...],
+            "safety_verdict": { ... },
+            "crc32": null  // 下一步计算
+          }
+        timeout_seconds: 60
+        depends_on: [n1_collect_channel_states, n2_validate_cross_dimension_consistency, n3_compute_d32_holistic_summary]
+
+      - node_id: n5_compute_crc32
+        agent_type: tool
+        prompt_template: >
+          对快照对象的 dimensions 部分（不含 crc32 字段本身）计算 CRC32 校验值，
+          填入 snapshot.crc32。
+          校验范围: JSON 序列化后的 dimensions 字典 + dna_root_id + timestamp。
+          确保数据完整性——太虚境接收时验证 CRC32 匹配。
+        timeout_seconds: 30
+        depends_on: [n4_build_snapshot_object]
+
+      - node_id: n6_serialize_protobuf_ready
+        agent_type: tool
+        prompt_template: >
+          将快照对象转换为 Protobuf 兼容结构（spine.proto 规范）：
+          - 所有浮点值保留 4 位小数
+          - 枚举字段使用整型码
+          - dimensions 使用 repeated SpineEntry 结构
+          - 整体使用 SpineSnapshot 作为外层 message
+          输出: protobuf_ready_dict（Python dict，可直接被 Transcoder encode）。
+          注意: 此时暂不进行实际 Protobuf 二进制编码——编码由太虚境 Transcoder 统一执行。
+          瑶灵只负责结构就绪。
+        timeout_seconds: 60
+        depends_on: [n5_compute_crc32]
+        post_guard:
+          guard_name: n6_structure_valid
+          rules:
+            - name: crc32_computed
+              description: CRC32 必须已计算
+              priority: 1
+            - name: no_missing_required_field
+              description: dna_root_id / location_fingerprint / timestamp 缺一不可
+              priority: 1
+
+    exit_guard:
+      guard_name: p2_encode_complete
+      rules:
+        - name: snapshot_object_built
+          description: 快照对象已构建完毕
+          priority: 1
+        - name: protobuf_structure_valid
+          description: 结构符合 spine.proto 规范
+          priority: 1
+
+# ---------------------------------------------------------------------------
+# 阶段 3: 发射快照
+# ---------------------------------------------------------------------------
+  - phase_id: p3_emit_snapshot
+    parallel: false
+    entry_guard:
+      guard_name: p3_emit_preflight
+      rules:
+        - name: p2_completed
+          description: 阶段2编码必须完成
+          priority: 1
+        - name: bus_connected
+          description: 全局总线必须已连接
+          priority: 2
+    nodes:
+      - node_id: n7_emit_to_tianquan
+        agent_type: tool
+        prompt_template: >
+          通过全局总线将完整 32D 快照发布至 tianquan_snapshot 频道。
+          消息信封:
+            channel: tianquan_snapshot
+            cmd: yaoling_32d_snapshot_push
+            target_domain: t
+            payload: <protobuf_ready_dict>
+            ttl: 3
+          不等待天权确认（瑶灵仅上行推送）。
+          记录发射时间戳和 msg_id 到 trace。
+        timeout_seconds: 30
+        depends_on: [n6_serialize_protobuf_ready]
+
+      - node_id: n8_record_emission_log
+        agent_type: tool
+        prompt_template: >
+          记录快照发射日志（本地 trace + 域内持久化）:
+          - dna_root_id
+          - 发射时间
+          - msg_id
+          - 快照摘要（整体健康等级、D32 生命体征速览、违规维度数）
+          用于审计和重复发射检测（§1 单次交互单海胆）。
+        timeout_seconds: 30
+        depends_on: [n7_emit_to_tianquan]
+
+    exit_guard:
+      guard_name: p3_emission_verified
+      rules:
+        - name: msg_sent
+          description: 快照消息已发布至天权
+          priority: 1
+        - name: log_recorded
+          description: 发射日志已记录
+          priority: 1
+        - name: single_snapshot_enforced
+          description: 同一 dna_root_id 下不得重复发射
+          priority: 1
+
+metadata:
+  domain: yaoling
+  allow_dynamic: false
+  max_retry_per_node: 0
+  total_timeout_seconds: 480
+  output_channel: tianquan_snapshot
+  single_snapshot_per_dna_root_id: true
+  serialization_target: spine.proto

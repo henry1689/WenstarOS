@@ -1,0 +1,118 @@
+# wf_code_review — 天权代码审查流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: code_review | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_code_review
+version: "2.0"
+description: >
+  天权代码审查流水线 — Master-Harris 调度, 本地 RPC 执行。
+  四阶段: lint → 架构一致性 → 安全扫描 → 性能 + 汇总报告
+mode: strict
+domain: tianquan
+route_tag: code_review
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, project_root, change_files]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    project_root: { type: string }
+    change_files: { type: array, items: { type: string } }
+    change_report_required: { type: boolean, default: true }
+    reviewer: { type: string }
+
+global_guard:
+  guard_name: tianquan_code_review_preflight
+  rules:
+    - { name: change_report_required, description: 任何代码修改必须附带四段式变更报告, priority: 0 }
+    - { name: no_destructive_without_backup, description: 删除/迁移操作前必须确认备份存在, priority: 1 }
+    - { name: coding_standard_compliance, description: 输出代码必须通过 lint_checker 校验, priority: 2 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1 | 天权禁止主动向瑶灵/瑶光下发指令", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2 | 必须从全局 DNA 向量库读取域 SPEC", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4 | 32D 仅由瑶灵/瑶光规则计算产出", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5 | 本次交互快照共用同一个 GlobalUID", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7 | 天权不自行持久化, 交 M2 三库", priority: 2 }
+
+phases:
+  - phase_id: p1_syntax_lint
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "LINT_CHECK"
+    entry_guard:
+      guard_name: p1_dna_preflight
+      rules:
+        - { name: dna_root_id_present, description: 约束中的 dna_root_id 非空, priority: 0 }
+    nodes:
+      - { node_id: n1_lint_check, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "执行编码规范校验 — 参考 validator/lint_checker.py 8条规则。逐文件扫描 change_files。" }
+      - { node_id: n2_import_audit, agent_type: tool, timeout_seconds: 60, depends_on: [n1_lint_check],
+          prompt_template: "审计 import 语句: 循环依赖检测 / 跨域越权导入 / 废弃模块引用。" }
+    exit_guard:
+      guard_name: p1_lint_gate
+      rules:
+        - { name: zero_critical_violations, description: 无关键违规项(L1/L2/L8), priority: 1 }
+
+  - phase_id: p2_arch_consistency
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "ARCH_REVIEW"
+    nodes:
+      - { node_id: n3_module_coupling, agent_type: tool, timeout_seconds: 120,
+          prompt_template: "使用 arch_parser.py 解析项目依赖图: 耦合度 / 循环依赖 / 变更影响面。" }
+      - { node_id: n4_interface_compliance, agent_type: tool, timeout_seconds: 90, depends_on: [n3_module_coupling],
+          prompt_template: "检查模块间接口契约: 导出签名变更 / 向后兼容 / BREAKING CHANGE 标记。" }
+    exit_guard:
+      guard_name: p2_arch_gate
+      rules:
+        - { name: no_new_circular_deps, description: 不得引入新的循环依赖, priority: 1 }
+        - { name: breaking_change_flagged, description: BREAKING CHANGE 必须在变更报告中声明, priority: 1 }
+
+  - phase_id: p3_security_scan
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "SECURITY_SCAN"
+    nodes:
+      - { node_id: n5_secret_leak_scan, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "扫描变更文件: 硬编码密钥/Token/密码 / 明文数据库连接串 / 内网IP泄露。" }
+      - { node_id: n6_injection_audit, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "审计注入风险: 字符串拼接SQL / 未参数化查询 / eval/exec 动态执行。" }
+    exit_guard:
+      guard_name: p3_security_gate
+      rules:
+        - { name: zero_secrets_leaked, description: 禁止任何密钥泄露, priority: 0 }
+        - { name: zero_sql_injection, description: 禁止SQL注入漏洞, priority: 0 }
+
+  - phase_id: p4_perf_and_report
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "PERF_AND_REPORT"
+    nodes:
+      - { node_id: n7_perf_hotspot, agent_type: tool, timeout_seconds: 90,
+          prompt_template: "分析性能热点: N+1查询 / 缺失索引 / 同步阻塞 / 大对象深拷贝。" }
+      - { node_id: n8_generate_report, agent_type: tool, timeout_seconds: 60, depends_on: [n7_perf_hotspot],
+          prompt_template: "汇总四阶段审查结果。附带 doc_generator.py 四段式变更报告。结果通过 RPC 返回 Master-Harris。" }
+    exit_guard:
+      guard_name: p4_final_gate
+      rules:
+        - { name: all_phases_completed, description: 四阶段必须全部完成, priority: 1 }
+        - { name: report_generated, description: 审查报告必须生成且非空, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: code_review
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 900
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

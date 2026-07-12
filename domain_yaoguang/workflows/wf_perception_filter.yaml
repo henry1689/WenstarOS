@@ -1,0 +1,202 @@
+# 瑶光 · 感知滤波工作流
+# =========================
+# 对应白皮书 §2.2 瑶光六层架构 — 第三层「人体生理规则」+ 第四层「人文社交」
+# 对多源原始信号进行去噪/归一化/异常剔除，输出干净的 32 维客观参数快照
+#
+# 铁律：瑶光仅输出客观标准基线值，不输出主观偏移量（偏移由太虚比对）
+
+workflow_id: wf_perception_filter
+version: "1.0"
+mode: strict
+description: >
+  瑶光感知滤波 — 对多源原始感知信号逐维去噪、归一化、异常值剔除，
+  输出标准化 D1-D32 客观参数快照（YaoguangUpstream 格式）。
+  输入: 原始传感器数据 / 场景参数 / 用户活动日志
+  输出: 32 维客观参数包 + dna_root_id + location_fingerprint + timestamp_ms
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, timestamp_ms]
+  properties:
+    dna_root_id:
+      type: string
+      description: "全局时序锚点 ID，格式 {timestamp_ms}-{random_hex}"
+    location_fingerprint:
+      type: string
+      description: "场景区位指纹，格式 {scene_type}:{scene_id}:{sub_zone}"
+    timestamp_ms:
+      type: integer
+      description: "快照时间戳毫秒"
+    raw_inputs:
+      type: object
+      description: "原始多源信号（可选，缺省则从 wf_objective_env_sample 实时采集）"
+    filter_profile:
+      type: string
+      enum: [normal, sensitive, relaxed]
+      default: normal
+      description: >
+        滤波强度: normal=标准滤波, sensitive=强去噪(敏感场景),
+        relaxed=宽松滤波(仅剔除极端异常值)
+
+# ---------------------------------------------------------------------------
+phases:
+
+  # ---- 阶段 1: 输入校验 ----
+  - phase_id: p1_validate_input
+    parallel: false
+    description: "必填字段校验 — 无锚点拒绝处理"
+    nodes:
+      - node_id: n1_check_required
+        agent_type: tool
+        prompt_template: >
+          校验以下必填字段，任一缺失则返回 error 拒绝处理：
+          - dna_root_id:          {{ constraints.dna_root_id }}
+          - location_fingerprint: {{ constraints.location_fingerprint }}
+          - timestamp_ms:         {{ constraints.timestamp_ms }}
+
+          校验规则:
+          - dna_root_id 格式: {数字}-{十六进制}，如 "20260709123456789-a1b2c3d4"
+          - location_fingerprint 格式: {scene_type}:{scene_id}:{sub_zone}
+          - timestamp_ms: 正整数，在合理时间范围内
+
+          输出为 JSON: { valid: true/false, errors: [...] }
+        timeout_seconds: 10
+
+  # ---- 阶段 2: 大类1 滤波 (D1-D8) ----
+  - phase_id: p2_filter_physical
+    parallel: false
+    description: "大类1 · 肉身实体基底客观标准值滤波 (D1-D8)"
+    nodes:
+      - node_id: n2_d1_d8_filter
+        agent_type: tool
+        prompt_template: >
+          对 D1-D8 原始信号进行滤波，输出客观标准基线值：
+
+          D1 骨骼肌肉: 标准乳酸 1.0 mmol/L | 肌力储备 60% | 无持续性酸痛
+          D2 躯体疼痛: 标准 VAS=0（无外部伤害事件时保持零）
+          D3 神经触觉: 标准交感兴奋度 35%（平稳放松态）
+          D4 内分泌:   皮质醇 14 μg/dL (晨) / 多巴胺 120 pg/mL / 血清素 110 ng/mL
+          D5 信息素:   中性基线（无压力汗液/亲和递质分泌正常）
+          D6 生理周期: BMR 标准值 | 周期 28 天稳定
+          D7 躯体自愈: 乳酸清除速率 1.2 mmol/h | 细胞修复效率基线
+          D8 五感环境: 体表 36.5℃ | 噪音 30-45 dB | 照度柔和
+
+          滤波配置: {{ constraints.filter_profile }}
+          原始信号: {{ constraints.raw_inputs }}
+
+          输出为 JSON: { d1, d2, d3, d4: {cortisol, dopamine, serotonin}, d5, d6, d7, d8 }
+        timeout_seconds: 60
+
+  # ---- 阶段 3: 大类2+3 滤波 (D9-D20) ----
+  - phase_id: p3_filter_psych_social
+    parallel: false
+    description: "大类2+3 · 精神内核与人际圈层客观基线值滤波 (D9-D20)"
+    nodes:
+      - node_id: n3_d9_d20_filter
+        agent_type: tool
+        prompt_template: >
+          对 D9-D20 原始信号进行滤波，输出客观标准基线值：
+
+          ## 大类2 个体内在精神 (D9-D14)
+          D9  自我认知:   自尊 32 分（中位基线）
+          D10 原生欲望:   探索递质正常基线
+          D11 恐惧倦怠:   SAS < 30（无焦虑）
+          D12 享受松弛:   催产素 45 pg/mL
+          D13 共情恻隐:   镜像神经元激活适中（不内耗）
+          D14 自我保护:   戒备基线平稳
+
+          ## 大类3 圈层人际羁绊 (D15-D20)
+          D15 伴侣依恋:   亲密催产素达标基线
+          D16 伴侣守护:   牵挂焦虑皮质醇平稳
+          D17 家庭归属:   安全感分值达标
+          D18 家庭守护:   家庭应激皮质醇平稳
+          D19 社交适配:   社交后皮质醇无明显上升
+          D20 团队保护:   集体应激激素平稳
+
+          注：瑶光仅输出客观基线值，不输出主观偏移量（偏移由太虚比对运算）。
+
+          滤波配置: {{ constraints.filter_profile }}
+          原始信号: {{ constraints.raw_inputs }}
+
+          输出为 JSON: { d9, d10, d11, d12, d13, d14, d15, d16, d17, d18, d19, d20 }
+        timeout_seconds: 60
+
+  # ---- 阶段 4: 大类4+5 滤波 (D21-D32) ----
+  - phase_id: p4_filter_env_growth
+    parallel: false
+    description: "大类4+5 · 时空环境与动态成长客观基线值滤波 (D21-D32)"
+    nodes:
+      - node_id: n4_d21_d32_filter
+        agent_type: tool
+        prompt_template: >
+          对 D21-D32 原始信号进行滤波，输出客观标准基线值：
+
+          ## 大类4 时空客观环境 (D21-D26)
+          D21 私人居所:   独处皮质醇应显著下降
+          D22 家庭布局:   居家情绪恢复效率达标
+          D23 职场厂区:   日工作负荷在耐受区间
+          D24 公共场地:   低人流环境神经基线平稳
+          D25 空间距离:   行程宽松，无时间焦虑
+          D26 气象节律:   褪黑素正常昼夜分泌节律
+
+          ## 大类5 全域动态生长 (D27-D32)
+          D27 微观生理:   微量内分泌波动平稳
+          D28 自然拓展:   定期新场景，探索多巴胺充足
+          D29 人文社交:   多圈层人际适配平稳
+          D30 精神文娱:   文娱/学习/健身资源充足
+          D31 主客耦合:   体感与环境匹配，整体应激低
+          D32 全域总控:   心率 60-72 bpm | 血压 110-120/68-78 mmHg |
+                         皮质醇 10-15 μg/dL | 愉悦激素 ≥110 pg/mL
+
+          滤波配置: {{ constraints.filter_profile }}
+          原始信号: {{ constraints.raw_inputs }}
+
+          输出为 JSON: { d21, d22, d23, d24, d25, d26, d27, d28, d29, d30, d31, d32 }
+        timeout_seconds: 60
+
+  # ---- 阶段 5: 组装 32 维快照 ----
+  - phase_id: p5_assemble_snapshot
+    parallel: false
+    description: "组装完整 32 维客观快照（YaoguangUpstream 格式）"
+    nodes:
+      - node_id: n5_pack
+        agent_type: tool
+        prompt_template: >
+          将 p2/p3/p4 的滤波结果组装为完整 32 维客观快照包：
+
+          1. 合并 D1-D32 全部客观参数
+          2. 绑定 dna_root_id:          {{ constraints.dna_root_id }}
+          3. 绑定 location_fingerprint: {{ constraints.location_fingerprint }}
+          4. 绑定 timestamp_ms:         {{ constraints.timestamp_ms }}
+          5. 生成 CRC32 校验标记
+          6. 输出标准化 YaoguangUpstream 格式
+
+          D1-D8   滤波结果:  {{ artifacts.n2_d1_d8_filter_result }}
+          D9-D20  滤波结果:  {{ artifacts.n3_d9_d20_filter_result }}
+          D21-D32 滤波结果:  {{ artifacts.n4_d21_d32_filter_result }}
+
+          输出完整 JSON（YaoguangUpstream 包）:
+          {
+            "dna_root_id": "...",
+            "timestamp_ms": ...,
+            "location_fingerprint": "...",
+            "objective": {
+              "d1": ..., "d2": ..., ... "d32": ...
+            },
+            "crc32": "..."
+          }
+        timeout_seconds: 30
+
+# ---------------------------------------------------------------------------
+global_guard:
+  guard_name: yaoguang_perception_guard
+  rules:
+    - name: no_subjective_in_output
+      description: "瑶光铁律 — 输出中禁止任何主观情绪/体感描述词"
+      priority: 1
+    - name: dna_root_id_required
+      description: "dna_root_id 必填 — 无全局锚点拒绝输出"
+      priority: 2
+    - name: all_dims_in_range
+      description: "D1-D32 全部输出参数必须在各自定义的物理学/生理学可行区间内"
+      priority: 10

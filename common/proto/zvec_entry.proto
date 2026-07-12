@@ -1,0 +1,88 @@
+// zvec_entry.proto — WenStar OS 知识库条目
+// ================================================================
+// 适配: DNA V2.0 + 大一统架构 V1.0
+// 用途: 知识库 L0-L3 分层条目 → Zvec 向量库存储
+// 跨语言: Python (wenstar_os) ↔ TypeScript (wenstar-cc) 共享
+//
+// 🔴 字段编号永久锁定，永不修改 / 删除 / 重排
+
+syntax = "proto3";
+
+package wenstar.zvec;
+
+// ── 知识库条目 ───────────────────────────────────────────────
+message ZvecEntry {
+  string resource_id      = 1;   // 知识条目唯一 ID
+  string global_uid       = 2;   // 绑定海胆 GlobalUID (知识来源记忆)
+  string dna_root_id      = 3;   // 向后兼容
+
+  // 来源
+  string source           = 10;  // 来源标识
+  string source_type      = 11;  // txt | md | pdf | docx | conversation | family_graph
+  string source_name      = 12;  // 文件名 / 对话标识
+
+  // L0-L3 分层
+  string l0_raw           = 20;  // 原始文档全文 / 对话原文
+  string l1_facts         = 21;  // 原子事实提取
+  string l2_summary       = 22;  // 场景聚类摘要
+  string l3_profile       = 23;  // 人格/知识画像
+
+  // 分类
+  string classification   = 30;  // 分类标签
+  bool   classification_pending = 31;  // 待分类标记
+
+  // 场景绑定
+  bytes  scene_label      = 40;  // 区位标签 (Protobuf 编码)
+  repeated string scene_tags = 41;  // 场景标签 (可读)
+
+  // 嵌入向量 (由 Zvec 引擎管理)
+  // high_dim_embedding 在查询时由 Zvec 自动追加, 不存储在 proto 中
+
+  // 交互追踪
+  string interaction_type = 50;  // conversation | solution | preference | profile | document | other
+  float  impression_score = 51;  // 印象分 (0-1)
+  string last_recalled_at = 52;  // ISO8601
+
+  // 时间戳
+  int64  created_at       = 60;  // Unix epoch 秒
+  int64  updated_at       = 61;
+
+  // 完整性
+  string crc32            = 70;
+}
+
+// ── 知识库批量操作请求 ──────────────────────────────────────
+message BatchSummaryRequest {
+  repeated string resource_ids = 1;
+  string spec_version          = 2;  // 域规范版本号
+  string dna_root_id           = 3;  // 操作绑定
+}
+
+message BatchSummaryResult {
+  string resource_id   = 1;
+  string l2_summary    = 2;
+  int32  char_count    = 3;
+  string error         = 4;  // 空=成功
+}
+
+message BatchLinkRequest {
+  repeated string resource_ids = 1;
+  string spec_version          = 2;
+}
+
+message BatchLinkResult {
+  string resource_id        = 1;
+  repeated string new_links = 2;
+  string error              = 3;
+}
+
+message BatchTagSceneRequest {
+  repeated string resource_ids = 1;
+  string spec_version          = 2;
+}
+
+message BatchTagSceneResult {
+  string resource_id        = 1;
+  repeated string scene_tags = 2;
+  string error              = 3;
+}

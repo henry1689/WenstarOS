@@ -1,0 +1,122 @@
+# wf_arch_refactor — 天权架构重构流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: arch_refactor | 通信: local_rpc | 域: tianquan
+# 仅超大架构重构可开启动态 DAG (由 Master-Harris 判定)
+
+workflow_id: wf_arch_refactor
+version: "2.0"
+description: >
+  天权架构重构流水线 — Master-Harris 调度, 本地 RPC 执行。
+  四阶段: 影响面分析 → 迁移方案设计 → 逐文件迁移 → 回归验证
+mode: strict
+domain: tianquan
+route_tag: arch_refactor
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, project_root, refactor_scope, backup_verified]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    project_root: { type: string }
+    refactor_scope: { type: object, properties: { target_modules: { type: array, items: { type: string } }, reason: { type: string } } }
+    backup_verified: { type: boolean }
+    allow_dynamic: { type: boolean, default: false }
+
+global_guard:
+  guard_name: tianquan_refactor_preflight
+  rules:
+    - { name: impact_analysis_required, description: 架构级修改必须先输出影响面报告, priority: 0 }
+    - { name: backup_verified_before_migration, description: 迁移前必须验证备份完整性(.snap), priority: 0 }
+    - { name: change_report_required, description: 每阶段完成后必须生成变更报告, priority: 1 }
+    - { name: regression_test_gate, description: P0模块修改后必须执行回归测试, priority: 2 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1 | 天权禁止主动向瑶灵/瑶光下发指令", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2 | 必须从全局 DNA 向量库读取域 SPEC", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4 | 32D 仅由瑶灵/瑶光规则计算产出", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5 | 本次交互快照共用同一个 GlobalUID", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7 | 天权不自行持久化", priority: 2 }
+    - { name: mh_dynamic_only_large_refactor, description: "MH-2补充 | 仅超大架构重构允许动态 DAG", priority: 1 }
+
+phases:
+  - phase_id: p1_impact_analysis
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "IMPACT_ANALYSIS"
+    entry_guard:
+      guard_name: p1_dna_preflight
+      rules:
+        - { name: dna_root_id_present, description: 约束中的 dna_root_id 非空, priority: 0 }
+        - { name: backup_verified, description: 备份完整性已确认, priority: 0 }
+    nodes:
+      - { node_id: n1_scan_references, agent_type: tool, timeout_seconds: 180,
+          prompt_template: "全项目扫描: arch_parser 构建依赖图 → 标记引用 → 区分直/间接引用 → 波及文件清单。" }
+      - { node_id: n2_risk_assessment, agent_type: tool, timeout_seconds: 60, depends_on: [n1_scan_references],
+          prompt_template: "评估重构风险: 高风险(>10文件) → 建议动态DAG / 中风险(5-10) / 低风险(<5)。" }
+    exit_guard:
+      guard_name: p1_impact_gate
+      rules:
+        - { name: impact_report_complete, description: 影响面报告必须包含完整波及文件清单, priority: 1 }
+        - { name: risk_level_assessed, description: 风险等级明确标注; 高风险标记通知 Master-Harris, priority: 1 }
+
+  - phase_id: p2_migration_plan
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "MIGRATION_PLAN"
+    nodes:
+      - { node_id: n3_design_migration_steps, agent_type: tool, timeout_seconds: 120,
+          prompt_template: "设计迁移方案: 步骤分解(每步可回滚) / 接口适配 / 灰度开关 / 回滚预案。" }
+      - { node_id: n4_create_snapshot, agent_type: tool, timeout_seconds: 60, depends_on: [n3_design_migration_steps],
+          prompt_template: "迁移前快照: snapshot_codec.py → 绑定 dna_root_id → .tianquan/snapshots/。" }
+    exit_guard:
+      guard_name: p2_plan_gate
+      rules:
+        - { name: migration_plan_approved, description: 迁移方案必须包含回滚预案, priority: 1 }
+        - { name: snapshot_created, description: 迁移前快照必须创建成功, priority: 0 }
+
+  - phase_id: p3_execute_migration
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "EXECUTE_MIGRATION"
+    nodes:
+      - { node_id: n5_batch_migrate, agent_type: tool, timeout_seconds: 600, retry_count: 2,
+          prompt_template: "逐文件迁移: 每批后 lint + arch_parser 校验 → 失败暂停 → Master-Harris FaultMemoryArchiver 记录。" }
+    exit_guard:
+      guard_name: p3_migration_gate
+      rules:
+        - { name: all_batches_succeeded, description: 所有批次必须迁移成功, priority: 1 }
+        - { name: lint_pass_after_migration, description: 迁移后 lint 0 关键违规, priority: 1 }
+
+  - phase_id: p4_regression_verify
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "REGRESSION_VERIFY"
+    nodes:
+      - { node_id: n6_run_regression_tests, agent_type: tool, timeout_seconds: 300,
+          prompt_template: "回归测试: 全量测试 / M1-M9 集成 / 快照差异对比 → 通过=完成 / 失败=回滚。" }
+      - { node_id: n7_cleanup_and_archive, agent_type: tool, timeout_seconds: 60, depends_on: [n6_run_regression_tests],
+          prompt_template: "清理废弃代码 → 更新文档 → 归档方案 → 结果返回 Master-Harris SnapshotAggregator。" }
+    exit_guard:
+      guard_name: p4_verify_gate
+      rules:
+        - { name: all_tests_passed, description: 全部回归测试必须通过, priority: 0 }
+        - { name: snapshot_diff_clean, description: 迁移前后快照差异在预期范围内, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: arch_refactor
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  allow_dynamic_condition: "risk_level == 'high' AND affected_modules > 10"
+  max_retry_per_node: 2
+  total_timeout_seconds: 1200
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

@@ -1,0 +1,123 @@
+# wf_knowledge_organize — 天权知识库整理流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: knowledge_sort | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_knowledge_organize
+version: "2.0"
+description: >
+  天权知识库整理流水线 — Master-Harris 调度, 本地 RPC 执行。
+  五阶段: 去重 → 分类 → 双链生成 → 摘要提取 → 冷热归档
+mode: strict
+domain: tianquan
+route_tag: knowledge_sort
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, vault_path]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    vault_path: { type: string, description: "知识库根路径" }
+    knowledge_category: { type: string, enum: [architecture, spec, plan, audit, record] }
+    force_overwrite: { type: boolean, default: false }
+
+global_guard:
+  guard_name: tianquan_knowledge_preflight
+  rules:
+    - { name: vault_path_valid, description: 知识库路径必须存在且可读写, priority: 0 }
+    - { name: no_duplicate_uid, description: 去重阶段必须保证知识条目 UID 唯一(含 dna_root_id 比对), priority: 1 }
+    - { name: backup_existing_links, description: 修改双链前备份现有元数据, priority: 2 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1 | 天权禁止主动向瑶灵/瑶光下发指令", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2 | 必须从全局 DNA 向量库读取域 SPEC", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4 | 知识库整理不产生 32D 浮点值", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5 | 本次交互快照共用同一个 GlobalUID", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7 | 知识库操作结果统一交 M2 三库+知识库存储层", priority: 2 }
+
+phases:
+  - phase_id: p1_dedup
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "DEDUP_CHECK"
+    entry_guard:
+      guard_name: p1_dna_preflight
+      rules:
+        - { name: dna_root_id_present, description: 约束中的 dna_root_id 非空, priority: 0 }
+        - { name: vault_path_valid, description: 知识库路径可读写, priority: 0 }
+    nodes:
+      - { node_id: n1_content_hash, agent_type: tool, timeout_seconds: 120,
+          prompt_template: "SHA256去重: 计算文档 hash → 与现有条目比对 → 完全一致=DUPLICATE跳过 / >0.95=NEAR_DUP确认。" }
+    exit_guard:
+      guard_name: p1_dedup_gate
+      rules:
+        - { name: no_exact_duplicates_stored, description: 完全重复文档不得再次入库, priority: 1 }
+
+  - phase_id: p2_classify
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "AUTO_CLASSIFY"
+    nodes:
+      - { node_id: n2_auto_classify, agent_type: tool, timeout_seconds: 90,
+          prompt_template: "自动分类: 标题关键词+内容特征 → architecture/spec/plan/audit/record → 分类标签+置信度。" }
+    exit_guard:
+      guard_name: p2_classify_gate
+      rules:
+        - { name: all_docs_classified, description: 所有入库文档必须有分类标签, priority: 1 }
+
+  - phase_id: p3_bilink
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "BILINK_GEN"
+    nodes:
+      - { node_id: n3_extract_wikilinks, agent_type: tool, timeout_seconds: 90,
+          prompt_template: "提取 [[WikiLink]]: 解析双链 → 检测断链 → 生成反向引用索引。" }
+      - { node_id: n4_suggest_new_links, agent_type: tool, timeout_seconds: 120, depends_on: [n3_extract_wikilinks],
+          prompt_template: "推荐新双链: 语义相似度>0.6且无现有双链 → top-5 推荐。" }
+    exit_guard:
+      guard_name: p3_bilink_gate
+      rules:
+        - { name: zero_broken_links_after_fix, description: 断链必须全部修复或标记为待补充, priority: 2 }
+
+  - phase_id: p4_summarize
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "L2_SUMMARY"
+    nodes:
+      - { node_id: n5_extract_l2_summary, agent_type: tool, timeout_seconds: 180,
+          prompt_template: "生成L2摘要: 100-200字 / 文档类型+核心主题+关键决策+相关文档 / 结构化 Markdown。" }
+    exit_guard:
+      guard_name: p4_summary_gate
+      rules:
+        - { name: all_summaries_generated, description: 所有入库文档必须有摘要, priority: 1 }
+
+  - phase_id: p5_archive
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "COLD_ARCHIVE"
+    nodes:
+      - { node_id: n6_cold_migration, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "冷热迁移: >30天未访问→冷存储 / >2年→归档→archive/ → 迁移日志。" }
+      - { node_id: n7_generate_knowledge_report, agent_type: tool, timeout_seconds: 60, depends_on: [n6_cold_migration],
+          prompt_template: "知识库健康报告: 总条目/新增/去重/归档 / 各类别分布 / 双链覆盖率 / 冷热比例 → Master-Harris。" }
+    exit_guard:
+      guard_name: p5_archive_gate
+      rules:
+        - { name: migration_log_complete, description: 迁移日志必须记录所有迁移操作, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: knowledge_sort
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 900
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

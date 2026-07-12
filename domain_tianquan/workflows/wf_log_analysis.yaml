@@ -1,0 +1,92 @@
+# wf_log_analysis — 天权日志分析流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: log_analysis | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_log_analysis
+version: "2.0"
+description: >
+  天权日志分析流水线 — 扫描日志文件, 检测错误模式/异常频率/趋势。
+  三阶段: 日志发现 → 模式分析 → 分析报告
+mode: strict
+domain: tianquan
+route_tag: log_analysis
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, project_root]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    project_root: { type: string }
+    log_dir: { type: string, description: "日志目录 (默认 data/logs)" }
+    max_files: { type: number, default: 50 }
+
+global_guard:
+  guard_name: tianquan_log_preflight
+  rules:
+    - { name: project_root_valid, description: 项目根路径必须存在, priority: 0 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7", priority: 2 }
+
+phases:
+  - phase_id: p1_discover
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "LOG_DISCOVER"
+    nodes:
+      - { node_id: n1_scan_logs, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "扫描项目中的日志文件: *.log, *.txt, console 输出重定向文件, 统计数量和大小。" }
+      - { node_id: n2_parse_log_levels, agent_type: tool, timeout_seconds: 120, depends_on: [n1_scan_logs],
+          prompt_template: "解析日志级别分布: ERROR/WARNING/INFO/DEBUG/TRACE 计数, 按时间聚合。" }
+    exit_guard:
+      guard_name: p1_discover_gate
+      rules:
+        - { name: log_files_scanned, description: 必须扫描至少 1 个日志文件或标记为无日志, priority: 1 }
+
+  - phase_id: p2_patterns
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "PATTERN_ANALYSIS"
+    nodes:
+      - { node_id: n3_error_frequency, agent_type: tool, timeout_seconds: 90, depends_on: [n2_parse_log_levels],
+          prompt_template: "错误频率分析: 统计 ERROR 出现频率/间隔/趋势, 检测爆发点, 标记 Top-N 高频错误。" }
+      - { node_id: n4_anomaly_detect, agent_type: tool, timeout_seconds: 60, depends_on: [n2_parse_log_levels],
+          prompt_template: "异常检测: 对比日志量均值, 标记异常尖峰 (z-score>2.0), 输出异常时段。" }
+    exit_guard:
+      guard_name: p2_patterns_gate
+      rules:
+        - { name: patterns_analyzed, description: 错误模式和异常检测至少完成一项, priority: 1 }
+
+  - phase_id: p3_report
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "LOG_REPORT"
+    nodes:
+      - { node_id: n5_generate_log_report, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "生成日志分析报告: 文件清单/级别分布/高频错误/异常时段/趋势建议。" }
+    exit_guard:
+      guard_name: p3_report_gate
+      rules:
+        - { name: report_generated, description: 分析报告必须生成, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: log_analysis
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 600
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

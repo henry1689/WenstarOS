@@ -1,0 +1,69 @@
+// token.proto — WenStar OS 壳肉语义单元
+// ================================================================
+// 适配: DNA V2.0 + 大一统架构 V1.0
+// 用途: 对话原文 → 最小语义单元 → 存储于原始数据层
+// 跨语言: Python (wenstar_os) ↔ TypeScript (wenstar-cc) 共享
+//
+// 🔴 字段编号永久锁定，永不修改 / 删除 / 重排
+
+syntax = "proto3";
+
+package wenstar.token;
+
+// ── 壳肉语义单元 ─────────────────────────────────────────────
+// 一条对话原文被拆分为 1-N 个 SemanticToken
+message SemanticToken {
+  string global_uid       = 1;   // 所属海胆 GlobalUID
+  string dna_root_id      = 2;   // 向后兼容
+  uint32 seq_idx          = 3;   // 在海胆内的序号 (从 0 递增)
+
+  // 文本内容
+  string token_text       = 10;  // 最小语义单元文本
+  uint32 char_offset      = 11;  // 在原文中的起始字符偏移
+  uint32 char_length      = 12;  // 字符长度
+
+  // L0-L3 编码附着
+  string locus_path       = 20;  // L0 基因组锚点
+  string l0_code          = 21;  // 4 字符 L0 分类码
+  string branch_id        = 22;  // L1 分支路由
+  uint32 seq_pos          = 23;  // L1 会话内序号
+  string leaf_zone        = 24;  // L2 语义区
+  string ref              = 25;  // L2 引用
+
+  // L3 实体标注 (与本 token 直接相关的实体)
+  repeated uint32 entity_gene_indices = 30;  // 指向同海胆 EntityGene 数组的索引
+
+  // 上下文
+  bytes context_offset    = 40;  // 上下文偏移 (预留, 暂为空)
+
+  // 完整性
+  string crc32            = 50;
+}
+
+// ── L3 实体基因 ──────────────────────────────────────────────
+// 一套实体基因属于一颗海胆, 被其下所有 SemanticToken 共享引用
+message EntityGene {
+  string name             = 1;   // 标准化实体名
+  string type             = 2;   // person | place | event | emotion | object | self
+  string allele           = 3;   // 原始文本片段
+  string phenotype        = 4;   // enhance | conflict | neutral
+  string knowledge_type   = 5;   // private | family | world
+}
+
+// ── 壳肉容器 (一颗海胆的全部壳肉) ────────────────────────────
+message FleshContainer {
+  string global_uid       = 1;
+  string raw_text         = 2;   // 原始对话文本 (完整)
+  repeated SemanticToken tokens = 3;    // 拆分后的语义单元
+  repeated EntityGene entity_genes = 4; // 实体基因列表
+
+  // DNA 编码追踪
+  string locus_path       = 10;
+  string l0_code          = 11;
+  string branch_id        = 12;
+  repeated string scene_tags = 13;
+
+  // 校验
+  string crc32            = 20;
+  string encoder_version  = 21;
+}

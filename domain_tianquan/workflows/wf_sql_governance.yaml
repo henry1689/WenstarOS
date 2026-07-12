@@ -1,0 +1,118 @@
+# wf_sql_governance — 天权 SQL 治理流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: sql_manage | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_sql_governance
+version: "2.0"
+description: >
+  天权 SQL 治理流水线 — Master-Harris 调度, 本地 RPC 执行。
+  四阶段: DDL审计 → 索引分析 → 迁移校验 → 治理报告 + 归档
+mode: strict
+domain: tianquan
+route_tag: sql_manage
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, db_path, schema_version]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    db_path: { type: string, description: "SQLite 数据库文件路径" }
+    schema_version: { type: string }
+    migration_scope: { type: array, items: { type: string } }
+
+global_guard:
+  guard_name: tianquan_sql_governance_preflight
+  rules:
+    - { name: backup_required_before_ddl, description: DDL变更前必须执行 WAL checkpoint + 备份, priority: 0 }
+    - { name: no_destructive_without_backup, description: DROP/ALTER 前必须验证备份有效, priority: 0 }
+    - { name: coding_standard_compliance, description: DDL 命名必须符合 SQL 规范, priority: 2 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1 | 天权禁止主动向瑶灵/瑶光下发指令", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2 | 必须从全局 DNA 向量库读取域 SPEC", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4 | 32D 仅由瑶灵/瑶光规则计算产出", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5 | 本次交互快照共用同一个 GlobalUID", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7 | SQL 治理结果不自行持久化", priority: 2 }
+
+phases:
+  - phase_id: p1_ddl_audit
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "DDL_AUDIT"
+    entry_guard:
+      guard_name: p1_dna_preflight
+      rules:
+        - { name: dna_root_id_present, description: 约束中的 dna_root_id 非空, priority: 0 }
+        - { name: db_accessible, description: 数据库路径可访问, priority: 0 }
+    nodes:
+      - { node_id: n1_extract_schema, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "使用 sql_parser.py 提取数据库完整 schema: 表/索引/外键/触发器 → SchemaReport。" }
+      - { node_id: n2_naming_audit, agent_type: tool, timeout_seconds: 60, depends_on: [n1_extract_schema],
+          prompt_template: "命名规范审计: snake_case表/列/索引名 / 禁止SQL关键字作为标识符。" }
+      - { node_id: n3_type_constraint_audit, agent_type: tool, timeout_seconds: 60, depends_on: [n1_extract_schema],
+          prompt_template: "字段类型与约束完整性: 时间字段类型 / CHECK约束 / WITHOUT ROWID 主键设计。" }
+    exit_guard:
+      guard_name: p1_ddl_gate
+      rules:
+        - { name: no_table_missing_pk, description: 每张表必须有主键, priority: 1 }
+        - { name: naming_compliant, description: 无严重命名违规(SQL关键字/中文表名), priority: 2 }
+
+  - phase_id: p2_index_analysis
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "INDEX_ANALYSIS"
+    nodes:
+      - { node_id: n4_missing_index_scan, agent_type: tool, timeout_seconds: 90,
+          prompt_template: "扫描缺失索引: WHERE/JOIN/ORDER BY/GROUP BY 列 → missing_index_report。" }
+      - { node_id: n5_redundant_index_scan, agent_type: tool, timeout_seconds: 90,
+          prompt_template: "检测冗余索引: 重叠覆盖 / 前缀重复 / 从未使用的索引。" }
+    exit_guard:
+      guard_name: p2_index_gate
+      rules:
+        - { name: critical_missing_indexes_flagged, description: 关键查询的缺失索引必须标记, priority: 1 }
+
+  - phase_id: p3_migration_verify
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "MIGRATION_VERIFY"
+    nodes:
+      - { node_id: n6_migration_dry_run, agent_type: tool, timeout_seconds: 120,
+          prompt_template: "数据迁移干跑: 计算前后行数+校验和 → 临时库执行SQL → 差异比对 → 拒绝/通过。" }
+      - { node_id: n7_execute_migration, agent_type: tool, timeout_seconds: 300, depends_on: [n6_migration_dry_run], retry_count: 1,
+          prompt_template: "正式迁移: WAL checkpoint → DDL/DML → 更新 schema_version → 绑定 dna_root_id 审计追溯。" }
+    exit_guard:
+      guard_name: p3_migration_gate
+      rules:
+        - { name: dry_run_passed, description: 干跑校验必须 100% 通过, priority: 0 }
+        - { name: row_count_consistent, description: 迁移前后行数必须一致, priority: 0 }
+        - { name: checksum_consistent, description: 迁移前后校验和必须一致, priority: 0 }
+
+  - phase_id: p4_report_archive
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "GOVERNANCE_REPORT"
+    nodes:
+      - { node_id: n8_generate_governance_report, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "生成SQL治理报告: DDL审计/索引分析/迁移结果 + schema快照。返回 Master-Harris SnapshotAggregator。" }
+    exit_guard:
+      guard_name: p4_report_gate
+      rules:
+        - { name: report_generated, description: 治理报告必须生成, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: sql_manage
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 900
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

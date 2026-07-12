@@ -1,0 +1,328 @@
+# wf_sensation_pipeline — 瑶灵 32D 体感生成核心流水线
+# ================================================================
+# 规格依据: YAOLING_DOMAIN_SPEC.md §2.3 通道处理流水线
+# 执行模式: STRICT（仅静态，禁止动态 DAG）
+# 触发条件: 接收 tianquan_snapshot 或 yaoguang_snapshot 信号
+# 输出: 标准化 32D 主观体感数据包
+
+workflow_id: wf_sensation_pipeline
+version: "1.0"
+description: >
+  瑶灵核心体感流水线 — 外部信号 → 32通道器官响应 → 正负体感计算 → 标准化输出。
+  覆盖 D1-D32 全维度，每个维度独立通道处理，互不交叉。
+mode: strict
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, medical_baseline_version]
+  properties:
+    dna_root_id:
+      type: string
+      pattern: "^DNA-\\d{8}-\\d{4}-\\d{3}$"
+    location_fingerprint:
+      type: string
+    medical_baseline_version:
+      type: string
+    caller_domain:
+      type: string
+      enum: [t, g]
+    scene_tags:
+      type: array
+      items: { type: string }
+
+# ---------------------------------------------------------------------------
+# 全局守门器 — 执行前强制校验
+# ---------------------------------------------------------------------------
+global_guard:
+  guard_name: yaoling_sensation_preflight
+  rules:
+    # [P0] 禁止动态工作流绕过
+    - name: no_dynamic_override
+      description: 瑶灵域 allow_dynamic_workflow=False，本工作流仅限静态执行
+      priority: 0
+
+    # [P1] DNA 时序锚点必须存在
+    - name: dna_root_id_required
+      description: 无 dna_root_id 拒绝执行，所有体感数据必须绑定时序锚点
+      priority: 1
+
+    # [P1] 空间区位指纹必须存在
+    - name: location_fingerprint_required
+      description: 无 location_fingerprint 拒绝执行，禁止无场景体感
+      priority: 1
+
+    # [P1] 瑶光医学基准版本必须声明
+    - name: medical_baseline_required
+      description: 无 medical_baseline_version 拒绝执行，禁止无基准偏移计算
+      priority: 1
+
+    # [P2] 调用方域校验
+    - name: caller_domain_valid
+      description: 仅接受来自天权(t)或瑶光(g)的信号输入
+      priority: 2
+
+    # [P3] Token 配额预检
+    - name: token_quota_check
+      description: 预估 Token 消耗不得超过 guard_token_quota(80000)
+      priority: 3
+
+# ---------------------------------------------------------------------------
+# 阶段 1: 信号接收与校验
+# ---------------------------------------------------------------------------
+phases:
+  - phase_id: p1_signal_receive
+    parallel: false
+    entry_guard:
+      guard_name: p1_input_validation
+      rules:
+        - name: signal_source_check
+          description: 信号源必须是 tianquan_snapshot 或 yaoguang_snapshot 频道
+          priority: 1
+        - name: signal_payload_schema
+          description: 信号载荷必须符合 32D 输入 schema
+          priority: 2
+    nodes:
+      - node_id: n1_receive_external_signal
+        agent_type: tool
+        prompt_template: >
+          接收外部输入信号，解析信号来源频道（tianquan_snapshot | yaoguang_snapshot），
+          提取 scene_tags、location_fingerprint、时间戳、瑶光客观参数（如有）。
+          校验 dna_root_id 格式: DNA-{YYYYMMDD}-{HHmm}-{seq}。
+          校验 location_fingerprint 非空。
+        timeout_seconds: 30
+        retry_count: 1
+        pre_guard:
+          guard_name: n1_preflight
+          rules:
+            - name: bus_channel_active
+              description: 确认全局总线订阅频道已激活
+              priority: 1
+
+      - node_id: n2_extract_scene_context
+        agent_type: tool
+        prompt_template: >
+          从信号中提取场景上下文：
+          - 空间区位: 当前场景类型（home/work/public/transit）
+          - 人际标签: 在场人员角色（partner/family/colleague/stranger/none）
+          - 环境参数: 温度/光照/噪音/天气（来自瑶光快照）
+          - 时间上下文: 时段（morning/afternoon/evening/night）、季节
+          输出结构化 SceneContext 对象。
+        timeout_seconds: 30
+        depends_on: [n1_receive_external_signal]
+
+      - node_id: n3_validate_against_baseline
+        agent_type: tool
+        prompt_template: >
+          加载 medical_baseline_version 对应的瑶光医学基准值，
+          验证所有输入参数是否在合法区间内。
+          若输入参数已触达危险阈值 → 直接拒绝，转入 p3_reject_emit。
+          若输入参数在风险区间 → 标记告警，继续执行但降级输出精度。
+        timeout_seconds: 30
+        depends_on: [n2_extract_scene_context]
+        post_guard:
+          guard_name: n3_safety_postcheck
+          rules:
+            - name: baseline_load_ok
+              description: 医学基准必须成功加载
+              priority: 1
+            - name: no_danger_input
+              description: 输入参数不得包含危险级数值
+              priority: 1
+
+# ---------------------------------------------------------------------------
+# 阶段 2: 32通道器官响应（五大类并行）
+# ---------------------------------------------------------------------------
+  - phase_id: p2_organ_response
+    parallel: true
+    entry_guard:
+      guard_name: p2_parallel_preflight
+      rules:
+        - name: p1_completed
+          description: 阶段1全部节点必须完成
+          priority: 1
+        - name: quota_remaining
+          description: 剩余 Token 配额 ≥ 20000
+          priority: 2
+    nodes:
+      # ── 大类1: 肉身实体基底 D1-D8 ──
+      - node_id: n4_physical_body_d1_d8
+        agent_type: tool
+        prompt_template: >
+          处理肉身实体基底维度 D1-D8：
+          D1 骨骼肌肉: 根据活动频率/久坐时长计算乳酸堆积值和肌力储备
+          D2 躯体疼痛: 根据压迫/撞击/失衡信号计算 VAS 疼痛评分
+          D3 神经触觉: 根据触碰/贴近/温度信号计算交感神经兴奋度
+          D4 内分泌: 根据情绪/陪伴/压力/孤独信号计算皮质醇、多巴胺、血清素
+          D5 信息素: 根据亲密距离/氛围信号计算气息柔和度/戒备度
+          D6 生理周期: 根据时间节律/代谢信号计算 BMR 波动和周期状态
+          D7 自愈修复: 根据休息/放松信号计算乳酸清除速率和恢复指数
+          D8 五感环境: 根据温/光/声/气味计算环境适配度和体感舒适度
+          每个子维度输出: value_raw(float), intensity(enum), organ_state(string)
+          严禁使用 LLM 直接生成浮点数值——全部由规则公式计算。
+        timeout_seconds: 120
+        retry_count: 1
+
+      # ── 大类2: 个体精神内核 D9-D14 ──
+      - node_id: n5_inner_spirit_d9_d14
+        agent_type: tool
+        prompt_template: >
+          处理个体内在精神内核维度 D9-D14：
+          D9 自我认知: 根据陪伴/评价/归属信号计算自尊分和人格稳定度
+          D10 成长驱动力: 根据新知/探索信号计算多巴胺驱动的进取欲望强度
+          D11 恐惧倦怠: 根据压力/失去/孤独信号计算 SAS 焦虑分值和制动程度
+          D12 享受幸福感: 根据陪伴/放松/被珍视信号计算催产素和满足度
+          D13 共情恻隐: 根据他人情绪/氛围信号计算镜像神经元激活强度
+          D14 个体自保: 根据危险/陌生信号计算戒备基线和防御强度
+          禁止 LLM 直接生成数值；基于 lexicons + 规则公式。
+        timeout_seconds: 120
+        retry_count: 1
+
+      # ── 大类3: 圈层人际羁绊 D15-D20 ──
+      - node_id: n6_social_bonds_d15_d20
+        agent_type: tool
+        prompt_template: >
+          处理圈层人际羁绊维度 D15-D20：
+          D15 伴侣依恋: 根据亲密互动/关怀信号计算催产素和依恋强度
+          D16 伴侣守护: 根据伴侣状态信号计算牵挂皮质醇和守护欲强度
+          D17 家庭归属: 根据家庭共处/安稳信号计算血清素和归属感分值
+          D18 家庭守护: 根据家庭风险/家人辛苦信号计算应激皮质醇和守护张力
+          D19 社交适配: 根据社交距离/人情信号计算社交疲劳分值和舒适度
+          D20 团队保护: 根据团队氛围/压力信号计算集体归属感和应激水平
+          人际维度联动规则: D15-D18 共享伴侣/家庭上下文，D19-D20 共享社交上下文。
+        timeout_seconds: 120
+        retry_count: 1
+
+      # ── 大类4: 时空环境感知 D21-D26 ──
+      - node_id: n7_spatiotemporal_d21_d26
+        agent_type: tool
+        prompt_template: >
+          处理时空客观环境感知维度 D21-D26：
+          D21 私人居所: 根据独处空间/私密信号计算居家安稳度和皮质醇下降幅度
+          D22 家庭布局: 根据整洁/光亮信号计算居家心情值和恢复效率
+          D23 职场环境: 根据工作氛围/劳作信号计算工作皮质醇和乳酸累积
+          D24 公共场地: 根据人流/嘈杂信号计算交感兴奋度和适配度
+          D25 时空距离: 根据移动耗时/日程信号计算时间紧迫皮质醇
+          D26 四季昼夜: 根据气温/昼夜/节气信号计算褪黑素节律和季节情绪
+          本组维度直接复用 p1 提取的 SceneContext 环境参数。
+        timeout_seconds: 120
+        retry_count: 1
+
+      # ── 大类5: 动态生长耦合 D27-D32 ──
+      - node_id: n8_dynamic_growth_d27_d32
+        agent_type: tool
+        prompt_template: >
+          处理动态生长・耦合拓展维度 D27-D32：
+          D27 微观生理: 根据微量激素波动信号计算微观敏感度
+          D28 自然拓展: 根据新场景/新地貌信号计算探索多巴胺
+          D29 人文细化: 根据新型人际关系信号计算包容递质和适配分值
+          D30 精神成长: 根据知识/文艺/健身信号计算精神血清素和成长满足度
+          D31 主客观耦合: 根据全身参数与环境匹配度计算耦合状态
+          D32 全身统筹: 汇总 D1-D31 → 生成核心生命体征（心率/血压/皮质醇均值/愉悦激素均值）
+          注意 D32 必须在所有前置维度计算完成后执行汇总。
+          严禁 LLM 直接输出数值；D32 汇总使用加权公式。
+        timeout_seconds: 120
+        depends_on: [n4_physical_body_d1_d8, n5_inner_spirit_d9_d14, n6_social_bonds_d15_d20, n7_spatiotemporal_d21_d26]
+        retry_count: 1
+
+    exit_guard:
+      guard_name: p2_organ_completion
+      rules:
+        - name: all_channels_executed
+          description: D1-D32 全部通道必须执行完毕
+          priority: 1
+        - name: no_null_output
+          description: 任意维度输出 value_raw 为 null → 拒绝通过
+          priority: 1
+        - name: d32_dependency_satisfied
+          description: D32 依赖于 D1-D31 全部完成
+          priority: 0
+
+# ---------------------------------------------------------------------------
+# 阶段 3: 体感计算与标准化输出
+# ---------------------------------------------------------------------------
+  - phase_id: p3_sensation_output
+    parallel: false
+    entry_guard:
+      guard_name: p3_pre_output_check
+      rules:
+        - name: p2_all_passed
+          description: 阶段2所有通道必须通过出口守门
+          priority: 1
+    nodes:
+      - node_id: n9_calculate_deviation
+        agent_type: tool
+        prompt_template: >
+          逐维计算偏移量：
+          偏移 = 当前 value_raw 对应真人指标 − 瑶光医学基准零点
+          映射到健康等级: healthy(0~+30) / sub_healthy(-30~-1) / risk(-60~-31) / danger(<-60)
+          参照规范 §3.4 各维度阈值表。
+        timeout_seconds: 60
+
+      - node_id: n10_safety_threshold_gate
+        agent_type: tool
+        prompt_template: >
+          安全阈值最终校验：
+          逐一检查 D1-D32 是否触达危险阈值（参照规范 §3.2-§3.4）。
+          若任一维度触达 danger → 拒绝输出，执行 §3.5 标准拒绝流程：
+            1. 生成 REJECT_REPORT
+            2. 通过 global_alert 广播告警
+            3. 记录 trace
+            4. 返回 {"code": -99, "reject_reason": "SAFETY_THRESHOLD_EXCEEDED", ...}
+          若全部通过 → 继续标准化输出。
+        timeout_seconds: 30
+        depends_on: [n9_calculate_deviation]
+        pre_guard:
+          guard_name: n10_hard_reject_guard
+          rules:
+            - name: d4_cortisol_lt_25
+              description: D4 皮质醇必须 < 25 μg/dL
+              priority: 1
+            - name: d4_dopamine_gt_60
+              description: D4 多巴胺必须 > 60 pg/mL
+              priority: 1
+            - name: d32_hr_55_to_90
+              description: D32 静息心率必须在 55-90 次/分之间
+              priority: 1
+            - name: d32_bp_valid
+              description: D32 血压高压 < 140 且低压 ≥ 60
+              priority: 1
+
+      - node_id: n11_assemble_32d_packet
+        agent_type: tool
+        prompt_template: >
+          组装标准化 32D 主观体感数据包：
+          每条维度包含: dim_id, dim_key, value_raw, intensity, deviation,
+          health_level, evidence_text, organ_state, sibling_dims, timestamp。
+          绑定 dna_root_id + location_fingerprint。
+          输出格式: spine.proto 兼容结构，预留 Protobuf 序列化接口。
+        timeout_seconds: 30
+        depends_on: [n10_safety_threshold_gate]
+
+      - node_id: n12_emit_to_tianquan
+        agent_type: tool
+        prompt_template: >
+          通过全局总线将 32D 数据包发布至 tianquan_snapshot 频道。
+          消息格式: { cmd: "yaoling_state_push", payload: <32D_PACKET> }
+          目标域: t（天权太虚境）
+          不等待天权确认——瑶灵仅负责上行推送。
+        timeout_seconds: 30
+        depends_on: [n11_assemble_32d_packet]
+
+    exit_guard:
+      guard_name: p3_output_integrity
+      rules:
+        - name: all_32_dims_present
+          description: 输出包必须包含完整的 D1-D32 数据
+          priority: 1
+        - name: dna_root_id_bound
+          description: 输出包必须绑定 dna_root_id
+          priority: 1
+        - name: crc32_present
+          description: 输出包必须包含 CRC32 校验值
+          priority: 2
+
+metadata:
+  domain: yaoling
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 600
+  output_channel: tianquan_snapshot

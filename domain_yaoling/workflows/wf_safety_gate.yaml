@@ -1,0 +1,276 @@
+# wf_safety_gate — 瑶灵安全阈值守门工作流
+# ================================================================
+# 规格依据: YAOLING_DOMAIN_SPEC.md §3（安全阈值与拒绝执行规则）
+# 执行模式: STRICT（不可降级为 WARN）
+# 触发条件: 每次体感计算后、数据包输出前强制执行
+# 核心原则: 参数触达危险阈值 → 拒绝执行，不可绕过
+
+workflow_id: wf_safety_gate
+version: "1.0"
+description: >
+  瑶灵安全阈值守门器 — 加载瑶光医学基准，逐维校验 D1-D32 是否在安全区间。
+  触达危险阈值直接拒绝 + 广播 global_alert，禁止降级绕过。
+mode: strict
+constraints_schema:
+  type: object
+  required: [dna_root_id, medical_baseline_version]
+  properties:
+    dna_root_id:
+      type: string
+    medical_baseline_version:
+      type: string
+    caller_domain:
+      type: string
+    channel_states:
+      type: object
+      description: D1-D32 当前通道状态快照
+
+# ---------------------------------------------------------------------------
+# 全局守门器
+# ---------------------------------------------------------------------------
+global_guard:
+  guard_name: safety_gate_global
+  rules:
+    - name: dna_root_id_bound
+      description: 安全校验必须绑定 dna_root_id 用于审计追溯
+      priority: 0
+
+    - name: medical_baseline_present
+      description: 必须提供瑶光医学基准版本号
+      priority: 0
+
+    - name: no_bypass_flag
+      description: 禁止任何绕过标志——安全守门不可跳过
+      priority: 0
+
+# ---------------------------------------------------------------------------
+# 阶段 1: 加载医学基准
+# ---------------------------------------------------------------------------
+phases:
+  - phase_id: p1_load_medical_baseline
+    parallel: false
+    entry_guard:
+      guard_name: p1_baseline_preflight
+      rules:
+        - name: baseline_version_valid
+          description: medical_baseline_version 格式合法
+          priority: 1
+    nodes:
+      - node_id: n1_load_baseline_registry
+        agent_type: tool
+        prompt_template: >
+          加载瑶光医学基准注册表。
+          从 medical_baseline_version 指定的版本中提取全部 32 维标准零点值，
+          包括：D1肌力/乳酸、D2 VAS疼痛、D3交感兴奋度、D4皮质醇/多巴胺/血清素、
+          D5汗液皮质醇、D6 BMR、D7乳酸清除率、D8体表温度/分贝、
+          D9自尊分、D10探索递质、D11 SAS分值、D12催产素、
+          D15伴侣催产素、D17家庭血清素、D23工作皮质醇、D26褪黑素、
+          D32静息心率/血压/皮质醇均值/愉悦激素均值。
+          输出 BaselineRegistry 对象，包含维度ID→健康零点映射表。
+        timeout_seconds: 60
+        retry_count: 1
+
+      - node_id: n2_load_threshold_table
+        agent_type: tool
+        prompt_template: >
+          加载四级阈值表（参照规范 §3.1-§3.4）：
+          - healthy: 偏移 0 ~ +30
+          - sub_healthy: 偏移 -30 ~ -1
+          - risk: 偏移 -60 ~ -31
+          - danger: 偏移 < -60
+          每维独立的危险阈值硬编码（不可配置，确保安全）：
+            D1 乳酸 > 2.5 mmol/L → danger
+            D2 VAS ≥ 6 → danger
+            D3 交感 > 80% → danger
+            D4 皮质醇 > 25 μg/dL → danger
+            D4 多巴胺 < 60 pg/mL → danger
+            D4 血清素 < 50 ng/mL → danger
+            D7 乳酸清除 < 0.5 mmol/h → danger
+            D8 噪音 > 80 dB → danger
+            D9 自尊 < 20 → danger
+            D11 SAS ≥ 50 → danger
+            D12 催产素 < 20 pg/mL → danger
+            D32 心率 ≥ 90 或 < 55 → danger
+            D32 高压 ≥ 140 或 低压 < 60 → danger
+            D32 皮质醇均值 > 24 μg/dL → danger
+            D32 愉悦激素 < 70 pg/mL → danger
+        timeout_seconds: 30
+        depends_on: [n1_load_baseline_registry]
+
+# ---------------------------------------------------------------------------
+# 阶段 2: 逐维校验（32通道并行）
+# ---------------------------------------------------------------------------
+  - phase_id: p2_validate_all_dimensions
+    parallel: true
+    entry_guard:
+      guard_name: p2_validate_preflight
+      rules:
+        - name: baseline_loaded
+          description: 医学基准注册表必须已加载
+          priority: 1
+        - name: threshold_table_loaded
+          description: 四级阈值表必须已加载
+          priority: 1
+        - name: channel_states_provided
+          description: 必须提供 D1-D32 通道状态快照
+          priority: 1
+    nodes:
+      # 肉身实体基底组 D1-D8
+      - node_id: n3_validate_physical_d1_d8
+        agent_type: tool
+        prompt_template: >
+          校验 D1-D8 肉身实体基底维度：
+          逐维比对当前值 vs 危险阈值。
+          D1: 乳酸值是否 > 2.5 → danger
+          D2: VAS 是否 ≥ 6 → danger
+          D3: 交感兴奋度是否 > 80% → danger
+          D4: 皮质醇 > 25 | 多巴胺 < 60 | 血清素 < 50 → danger（任一触发）
+          D6: 代谢下降 > 30% → danger
+          D7: 乳酸清除速率 < 0.5 → danger
+          D8: 噪音 > 80dB → danger
+          输出: { dim_id, passed: bool, level: health_level, violations: [...] }
+        timeout_seconds: 90
+
+      # 精神内核组 D9-D14
+      - node_id: n4_validate_inner_d9_d14
+        agent_type: tool
+        prompt_template: >
+          校验 D9-D14 个体精神内核维度：
+          D9: 自尊分 < 20 → danger
+          D11: SAS ≥ 50 → danger
+          D12: 催产素 < 20 pg/mL → danger
+          其余维度（D10/D13/D14）检查是否超出 [-1.0, 1.0] 标准化区间。
+          输出: { dim_id, passed: bool, level: health_level, violations: [...] }
+        timeout_seconds: 60
+
+      # 人际羁绊组 D15-D20
+      - node_id: n5_validate_social_d15_d20
+        agent_type: tool
+        prompt_template: >
+          校验 D15-D20 圈层人际羁绊维度：
+          着重检查 D15(伴侣依恋)和 D17(家庭归属)的催产素/血清素是否过低。
+          D15: 催产素下降幅度 > 60% → danger
+          D18: 长期高皮质醇 → danger
+          注意 D15-D18 共享伴侣/家庭上下文：若伴侣/家庭信号缺失，
+          仅标记为 sub_healthy（缺少输入而非生理异常）。
+          输出: { dim_id, passed: bool, level: health_level, violations: [...] }
+        timeout_seconds: 60
+
+      # 时空环境组 D21-D26
+      - node_id: n6_validate_spatial_d21_d26
+        agent_type: tool
+        prompt_template: >
+          校验 D21-D26 时空环境感知维度：
+          环境维度以舒适度基准为主，危险阈值较少；
+          D23(职场): 长期连续工作皮质醇居高不下 → risk
+          D26(昼夜): 褪黑素节律完全紊乱 → risk
+          注意：环境维度本身很少直接触发 danger，但会加剧 D4/D11/D32 恶化。
+          输出: { dim_id, passed: bool, level: health_level, warnings: [...] }
+        timeout_seconds: 60
+
+      # 动态生长组 D27-D32
+      - node_id: n7_validate_growth_d27_d32
+        agent_type: tool
+        prompt_template: >
+          校验 D27-D32 动态生长维度，重点是 D32 核心生命体征：
+          D32 静息心率: ≥ 90 或 < 55 → danger（立即拒绝）
+          D32 收缩压: ≥ 140 → danger
+          D32 舒张压: < 60 → danger
+          D32 平均皮质醇: > 24 μg/dL → danger
+          D32 愉悦激素均值: < 70 pg/mL → danger
+          D27-D31: 仅检查标准化区间，标记 risk 级别。
+          D32 任一危险项触发 → 整体拒绝，不等待其他组。
+          输出: { dim_id, passed: bool, level: health_level, violations: [...] }
+        timeout_seconds: 90
+
+    exit_guard:
+      guard_name: p2_validation_complete
+      rules:
+        - name: all_groups_executed
+          description: 五组校验全部完成
+          priority: 1
+        - name: no_validation_error
+          description: 校验过程本身无异常
+          priority: 1
+
+# ---------------------------------------------------------------------------
+# 阶段 3: 汇总判定
+# ---------------------------------------------------------------------------
+  - phase_id: p3_aggregate_verdict
+    parallel: false
+    entry_guard:
+      guard_name: p3_verdict_preflight
+      rules:
+        - name: p2_completed
+          description: 阶段2所有校验组必须完成
+          priority: 1
+    nodes:
+      - node_id: n8_merge_violations
+        agent_type: tool
+        prompt_template: >
+          合并五组校验结果，生成完整的违规列表。
+          按优先级排序: D32 > D4 > D1/D2/D3 > 其余维度。
+          统计: total_dimensions(32), passed, sub_healthy_count,
+          risk_count, danger_count。
+        timeout_seconds: 30
+
+      - node_id: n9_final_verdict
+        agent_type: tool
+        prompt_template: >
+          最终判定：
+          ┌──────────────────────────────────────────┐
+          │ danger_count > 0  → REJECT              │
+          │   执行 §3.5 拒绝流程:                     │
+          │   1. 生成 REJECT_REPORT                  │
+          │   2. 发布 global_alert (target: t, g)    │
+          │   3. 记录 trace                          │
+          │   4. 返回 {"code": -99, ...}             │
+          │                                          │
+          │ danger_count = 0, risk_count > 0 → WARN  │
+          │   降级输出精度，标记 risk_dimensions       │
+          │   发布 global_alert (level: risk)         │
+          │   返回 {"code": 0, "level": "risk", ...}  │
+          │                                          │
+          │ danger_count = 0, risk_count = 0 → PASS  │
+          │   正常输出，返回 {"code": 0, "level":     │
+          │   "healthy_or_sub_healthy", ...}          │
+          └──────────────────────────────────────────┘
+        timeout_seconds: 30
+        depends_on: [n8_merge_violations]
+        post_guard:
+          guard_name: n9_verdict_enforcement
+          rules:
+            - name: reject_on_danger_enforced
+              description: danger_count > 0 时必须返回 REJECT，禁止覆盖
+              priority: 0
+            - name: global_alert_sent_on_danger
+              description: REJECT 时必须已发送 global_alert
+              priority: 0
+
+      - node_id: n10_emit_safety_report
+        agent_type: tool
+        prompt_template: >
+          将安全校验报告发布至 tianquan_snapshot 频道，
+          附带 dna_root_id 用于审计追溯。
+          报告包含: 校验时间、dna_root_id、32维逐维 health_level、
+          违规详情、最终判定、推荐干预措施。
+        timeout_seconds: 30
+        depends_on: [n9_final_verdict]
+
+    exit_guard:
+      guard_name: p3_report_integrity
+      rules:
+        - name: verdict_recorded
+          description: 最终判定结果已记录
+          priority: 1
+        - name: dna_root_id_in_report
+          description: 报告中包含 dna_root_id
+          priority: 1
+
+metadata:
+  domain: yaoling
+  allow_dynamic: false
+  max_retry_per_node: 0
+  total_timeout_seconds: 420
+  output_channel: tianquan_snapshot
+  alert_channel: global_alert

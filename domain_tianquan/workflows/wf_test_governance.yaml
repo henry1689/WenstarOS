@@ -1,0 +1,110 @@
+# wf_test_governance — 天权测试治理流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: test_govern | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_test_governance
+version: "2.0"
+description: >
+  天权测试治理流水线 — Master-Harris 调度, 本地 RPC 执行。
+  四阶段: 测试发现 → 执行 → 覆盖率分析 → 治理报告
+mode: strict
+domain: tianquan
+route_tag: test_govern
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, project_root]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    project_root: { type: string, description: "项目根路径" }
+    test_command: { type: string, default: "pytest" }
+    coverage_threshold: { type: number, default: 0.7 }
+
+global_guard:
+  guard_name: tianquan_test_preflight
+  rules:
+    - { name: project_root_valid, description: 项目根路径必须存在, priority: 0 }
+    - { name: test_dir_exists, description: 测试目录必须存在, priority: 1 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1 | 天权禁止主动向瑶灵/瑶光下发指令", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2 | 必须从全局 DNA 向量库读取域 SPEC", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4 | 工程任务不产生 32D 浮点值", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5 | 本次交互快照共用同一个 GlobalUID", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7 | 测试结果统一交 M2 三库存储层", priority: 2 }
+
+phases:
+  - phase_id: p1_discover
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "TEST_DISCOVERY"
+    entry_guard:
+      guard_name: p1_project_preflight
+      rules:
+        - { name: dna_root_id_present, description: 约束中的 dna_root_id 非空, priority: 0 }
+        - { name: project_root_accessible, description: 项目根路径可访问, priority: 0 }
+    nodes:
+      - { node_id: n1_scan_test_files, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "扫描项目中的测试文件 (*.test.* / *_test.* / test_* / tests/), 统计测试文件数/大小/覆盖模块。" }
+      - { node_id: n2_analyze_test_structure, agent_type: tool, timeout_seconds: 90, depends_on: [n1_scan_test_files],
+          prompt_template: "分析测试结构: 单元/集成/E2E 分类, 框架检测, 文件组织结构评估。" }
+    exit_guard:
+      guard_name: p1_discover_gate
+      rules:
+        - { name: test_files_found, description: 必须发现至少 1 个测试文件, priority: 1 }
+
+  - phase_id: p2_execute
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "TEST_EXECUTE"
+    nodes:
+      - { node_id: n3_run_tests, agent_type: tool, timeout_seconds: 600,
+          prompt_template: "执行测试套件: 收集 pass/fail/skip/error 计数, 提取失败用例详情(文件/行号/错误消息)。" }
+    exit_guard:
+      guard_name: p2_execute_gate
+      rules:
+        - { name: test_results_collected, description: 必须收集到测试结果 (pass+fail+skip+error > 0), priority: 1 }
+
+  - phase_id: p3_coverage
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "COVERAGE_ANALYSIS"
+    nodes:
+      - { node_id: n4_coverage_report, agent_type: tool, timeout_seconds: 120, depends_on: [n3_run_tests],
+          prompt_template: "覆盖率分析: 查找 coverage.xml/.coverage/htmlcov, 提取行/分支覆盖率, 标记低覆盖模块(<70%)。" }
+      - { node_id: n5_flaky_detection, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "剥落测试检测: 统计最近 N 次运行中 pass→fail→pass 的模式, 标记不稳定用例。" }
+    exit_guard:
+      guard_name: p3_coverage_gate
+      rules:
+        - { name: coverage_data_present, description: 覆盖率数据必须存在或被标记为不可用, priority: 1 }
+
+  - phase_id: p4_report
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "TEST_REPORT"
+    nodes:
+      - { node_id: n6_generate_test_report, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "生成测试治理报告: 总结通过率/覆盖率/剥落用例/低覆盖模块 + 改进建议。" }
+    exit_guard:
+      guard_name: p4_report_gate
+      rules:
+        - { name: report_generated, description: 治理报告必须生成, priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: test_govern
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 1200
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

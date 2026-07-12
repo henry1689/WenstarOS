@@ -1,0 +1,99 @@
+# wf_change_report — 天权变更报告生成流水线 V2.0
+# ================================================================
+# 适配: Harris-YAML V2.0 / Master-Harris V1.0 / DNA V2.0
+# 路由标签: change_report | 通信: local_rpc | 域: tianquan
+
+workflow_id: wf_change_report
+version: "2.0"
+description: >
+  天权变更报告生成流水线 — Master-Harris 调度, 本地 RPC 执行。
+  三阶段: 变更发现(Git diff/快照对比) → 影响面分析(架构+依赖) → 四段式报告生成
+mode: strict
+domain: tianquan
+route_tag: change_report
+executor_type: local_rpc
+
+constraints_schema:
+  type: object
+  required: [dna_root_id, location_fingerprint, spec_version, task, project_root]
+  properties:
+    dna_root_id: { type: string, pattern: "^\\d{6}\\d{14}M01[A-Z]{4}$" }
+    location_fingerprint: { type: string }
+    spec_version: { type: string, const: "TIANQUAN-SPEC-20260711" }
+    task: { type: string }
+    project_root: { type: string, description: "项目根路径" }
+    change_type: { type: string, enum: [feature, fix, refactor, perf, security, docs] }
+    author: { type: string, default: "天权-Harris" }
+    compare_branch: { type: string, default: "main" }
+    snapshot_id: { type: string, description: "与指定快照对比 (留空则对比当前工作区)" }
+
+global_guard:
+  guard_name: tianquan_changereport_preflight
+  rules:
+    - { name: project_root_valid, description: 项目根路径必须存在且为 Git 仓库或已创建快照, priority: 0 }
+    - { name: change_type_valid, description: 变更类型必须在枚举范围内, priority: 1 }
+    - { name: mh_no_cross_domain_issue, description: "MH-1 | 天权禁止主动向瑶灵/瑶光下发指令", priority: 0 }
+    - { name: mh_spec_constraints_required, description: "MH-2 | 必须从全局 DNA 向量库读取域 SPEC", priority: 0 }
+    - { name: mh_no_llm_float_output, description: "MH-4 | 工程任务不产生 32D 浮点值", priority: 1 }
+    - { name: mh_single_globaluid, description: "MH-5 | 本次交互快照共用同一个 GlobalUID", priority: 1 }
+    - { name: mh_no_local_persistence, description: "MH-7 | 变更报告统一交 M2 三库存储层", priority: 2 }
+
+phases:
+  - phase_id: p1_discover_changes
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "CHANGE_DISCOVERY"
+    entry_guard:
+      guard_name: p1_project_check
+      rules:
+        - { name: project_root_accessible, description: 项目根路径可访问, priority: 0 }
+    nodes:
+      - { node_id: n1_git_diff, agent_type: tool, timeout_seconds: 30,
+          prompt_template: "Git 变更发现: git diff --stat + git log 最近提交, 提取变更文件列表+变更类型。" }
+      - { node_id: n2_snapshot_diff, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "快照对比: 如果提供了 snapshot_id, 与当前工作区对比文件差异 (增/删/改)。" }
+    exit_guard:
+      guard_name: p1_discover_gate
+      rules:
+        - { name: changes_detected, description: 必须有变更文件或提交记录, priority: 1 }
+
+  - phase_id: p2_impact_analysis
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "IMPACT_ANALYSIS"
+    nodes:
+      - { node_id: n3_arch_impact, agent_type: tool, timeout_seconds: 120, depends_on: [n1_git_diff],
+          prompt_template: "架构影响分析: 解析变更文件的依赖图, 计算受影响模块+耦合传播路径。" }
+      - { node_id: n4_security_impact, agent_type: tool, timeout_seconds: 60, depends_on: [n1_git_diff],
+          prompt_template: "安全影响扫描: 检查变更文件是否引入新的 eval/exec/硬编码密钥/危险调用。" }
+    exit_guard:
+      guard_name: p2_impact_gate
+      rules:
+        - { name: impact_complete, description: 影响面分析必须完成 (至少包含模块影响列表), priority: 1 }
+
+  - phase_id: p3_generate_report
+    parallel: false
+    route_stamp_workshop: "TianquanRPC"
+    route_stamp_operation: "REPORT_GENERATION"
+    nodes:
+      - { node_id: n5_generate_change_report, agent_type: tool, timeout_seconds: 60,
+          prompt_template: "生成四段式变更报告: 摘要→详情→影响面→验证方法, Markdown 格式, 含 affected_files/breaking_change 标记。" }
+    exit_guard:
+      guard_name: p3_report_gate
+      rules:
+        - { name: report_has_four_sections, description: 报告必须包含四段 (摘要/详情/影响面/验证方法), priority: 1 }
+
+metadata:
+  domain: tianquan
+  route_tag: change_report
+  spec_version: "TIANQUAN-SPEC-20260711"
+  communication: local_rpc
+  harris_version: "2.0"
+  allow_dynamic: false
+  max_retry_per_node: 1
+  total_timeout_seconds: 600
+  master_harris:
+    layer: DomainExecutorPool
+    executor: LocalTianquanRPC
+    snapshot_handler: SnapshotAggregator
+    fault_handler: FaultMemoryArchiver

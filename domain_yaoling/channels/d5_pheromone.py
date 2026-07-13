@@ -12,26 +12,39 @@ class D5PheromoneChannel(BaseChannel):
     def __init__(self): super().__init__(D5_CONFIG)
 
     def _organ_response(self, s: SignalInput) -> OrganState:
-        labels = s.interpersonal_labels
-        has_partner = "partner" in labels
-        has_family = "family" in labels
-        # 汗液皮质醇相对浓度: 紧张↑/亲密↓/家庭↓
+        has_partner = "partner" in s.interpersonal_labels
+        has_family = "family" in s.interpersonal_labels
+        has_stranger = "stranger" in s.interpersonal_labels
+        work_duration = s.duration_context.get("work_duration_hours", 0)
+        hours_since_chat = s.duration_context.get("hours_since_last_chat", 0)
+
+        WARM = ["温柔","安心","亲近","暖和","柔软","甜蜜","温馨","暖","爱","依偎","靠","贴",
+                "香","清香","芬芳","好闻","熟悉","舒适","放松"]
+        COLD = ["冰冷","疏离","压抑","紧绷","陌生","冷淡","冷漠","抗拒","距离","隔阂",
+                "汗味","臭味","异味","难闻","刺鼻","闷","不透气"]
+
+        warm_hits = sum(1 for kw in WARM if kw in s.raw_input_text)
+        cold_hits = sum(1 for kw in COLD if kw in s.raw_input_text)
+
         sweat_cortisol = 0.0
-        positive_aura = sum(1 for kw in ["温柔","安心","亲近","暖和","柔软","甜蜜"] if kw in s.raw_input_text)
-        negative_aura = sum(1 for kw in ["冰冷","疏离","压抑","紧绷","陌生","冷淡"] if kw in s.raw_input_text)
-        sweat_cortisol += negative_aura * 0.15 - positive_aura * 0.12
-        sweat_cortisol -= 0.2 if has_partner else 0
-        sweat_cortisol -= 0.1 if has_family else 0
+        sweat_cortisol += cold_hits * 0.12 - warm_hits * 0.10
+        sweat_cortisol += (0.15 if has_stranger else 0) + work_duration * 0.01
+        sweat_cortisol -= (0.20 if has_partner else 0) + (0.10 if has_family else 0)
+        sweat_cortisol += max(0, hours_since_chat - 6) * 0.02  # 长期独处→气息冷
         sweat_cortisol = round(max(0.0, min(sweat_cortisol, 1.0)), 2)
-        # 亲和递质: 1.0 - 汗液皮质醇
         affinity = round(1.0 - sweat_cortisol, 2)
-        return OrganState(organ_name="气息分泌/隐性氛围系统", metrics={"sweat_cortisol": sweat_cortisol, "affinity_neurotransmitter": affinity}, activation_level=sweat_cortisol)
+
+        return OrganState(
+            organ_name="气息分泌/隐性氛围释放系统",
+            metrics={"sweat_cortisol": sweat_cortisol, "affinity_neurotransmitter": affinity,
+                     "warm_signals": warm_hits, "cold_signals": cold_hits},
+            activation_level=sweat_cortisol,
+        )
 
     def _compute_sensation(self, o: OrganState, s: SignalInput) -> tuple[float, Intensity, str]:
         affinity = o.metrics["affinity_neurotransmitter"]
-        sc = o.metrics["sweat_cortisol"]
-        if affinity >= 0.8: return (0.7, Intensity.LOW, "气场柔和温暖,亲近气息外放")
-        if affinity >= 0.6: return (0.3, Intensity.LOW, "气场平稳自然")
-        if affinity >= 0.4: return (-0.2, Intensity.MEDIUM, "压力气息偏重,略感疏离")
-        if affinity >= 0.2: return (-0.55, Intensity.HIGH, "气场冷淡紧绷,人际隔阂感强")
-        return (-0.85, Intensity.EXTREME, "极度压抑冰冷,长期紧绷无亲和力")
+        if affinity >= 0.85: return (0.7, Intensity.LOW, "气场柔和温暖，亲近气息自然外放")
+        if affinity >= 0.65: return (0.25, Intensity.MEDIUM, "气场平稳自然")
+        if affinity >= 0.45: return (-0.1, Intensity.MEDIUM, "压力气息偏重，人际略感隔阂")
+        if affinity >= 0.25: return (-0.45, Intensity.HIGH, "气场冷淡紧绷，人际相处易感到距离")
+        return (-0.80, Intensity.EXTREME, "极度压抑冰冷，长期紧绷无亲和力")

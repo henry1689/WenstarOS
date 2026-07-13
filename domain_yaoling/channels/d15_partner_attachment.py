@@ -13,24 +13,38 @@ class D15PartnerAttachmentChannel(BaseChannel):
 
     def _organ_response(self, s: SignalInput) -> OrganState:
         has_partner = "partner" in s.interpersonal_labels
-        intimate_hits = sum(1 for kw in ["爱你","想你","抱","亲","陪伴","一起","温暖","甜蜜","心动","幸福","依恋","离不开","需要你","在一起"] if kw in s.raw_input_text)
-        lonely_hits = sum(1 for kw in ["孤单","失落","疏离","冷落","分开","一个人","遥远","不在"] if kw in s.raw_input_text)
         hours_since_chat = s.duration_context.get("hours_since_last_chat", 0)
+
+        INTIMATE = ["爱你","想你","拥抱","亲吻","陪伴","一起","温暖","甜蜜","心动","幸福",
+                    "依恋","离不开","需要你","在一起","陪","想念","思念"]
+        LONELY = ["孤单","失落","疏离","冷落","分开","遥远","不在一起","等","盼","寂寞",
+                  "一个人","自己","没你","不在身边"]
+
+        int_hits = sum(1 for kw in INTIMATE if kw in s.raw_input_text)
+        lone_hits = sum(1 for kw in LONELY if kw in s.raw_input_text)
+
         oxytocin = 50.0
         if has_partner:
-            oxytocin += intimate_hits * 5 - lonely_hits * 6
-            oxytocin -= max(0, hours_since_chat - 2) * 1.5
+            oxytocin += int_hits * 4 - lone_hits * 5
+            oxytocin -= max(0, hours_since_chat - 3) * 1.0
         else:
-            oxytocin -= 10  # 无伴侣在场时略低
-        oxytocin = round(max(8.0, min(oxytocin, 80.0)), 1)
-        attachment_strength = round(oxytocin / 80, 2)
-        return OrganState(organ_name="亲密激素/依恋神经中枢", metrics={"oxytocin": oxytocin, "attachment_strength": attachment_strength, "partner_present": 1 if has_partner else 0}, activation_level=round(1.0 - attachment_strength, 2))
+            oxytocin -= 8 + lone_hits * 3
+        oxytocin = round(max(8.0, min(oxytocin, 85.0)), 1)
+        attachment_strength = round(oxytocin / 85, 2)
+
+        return OrganState(
+            organ_name="亲密激素/依恋神经中枢",
+            metrics={"oxytocin": oxytocin, "attachment_strength": attachment_strength,
+                     "partner_present": 1 if has_partner else 0,
+                     "intimate_signals": int_hits, "lonely_signals": lone_hits},
+            activation_level=round(1.0 - attachment_strength, 2),
+        )
 
     def _compute_sensation(self, o: OrganState, s: SignalInput) -> tuple[float, Intensity, str]:
         oxy = o.metrics["oxytocin"]
         strength = o.metrics["attachment_strength"]
-        if strength >= 0.7: return (0.8, Intensity.LOW, "心动治愈,依恋饱满甜蜜,亲密满足")
-        if strength >= 0.5: return (0.3, Intensity.MEDIUM, "依恋基本满足,偶尔思念")
-        if strength >= 0.3: return (-0.3, Intensity.HIGH, "孤单失落感明显,缺少亲密安抚")
-        if strength >= 0.15: return (-0.6, Intensity.HIGH, "深度情感饥渴,被冷落感强烈")
-        return (-0.9, Intensity.EXTREME, "亲密催产素严重不足,深度情感空虚")
+        if strength >= 0.75: return (0.8, Intensity.LOW, "心动治愈，依恋饱满甜蜜，亲密满足")
+        if strength >= 0.55: return (0.3, Intensity.MEDIUM, "依恋基本满足，偶尔思念")
+        if strength >= 0.35: return (-0.2, Intensity.MEDIUM, "孤单失落感明显，缺少亲密安抚")
+        if strength >= 0.18: return (-0.55, Intensity.HIGH, "深度情感饥渴，被冷落感强烈")
+        return (-0.88, Intensity.EXTREME, "亲密催产素严重不足，深度情感空虚")

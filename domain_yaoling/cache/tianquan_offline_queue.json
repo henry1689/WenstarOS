@@ -1,0 +1,177 @@
+[
+  {
+    "dna_root_id": "DNA-20260713-1251-001",
+    "timestamp": "2026-07-13T12:51:10",
+    "location_fingerprint": "office.深夜加班办公",
+    "snapshot_summary": {
+      "overall_health": "risk",
+      "vital_signs": {
+        "heart_rate": 74.4,
+        "blood_pressure_sys": 126.5,
+        "blood_pressure_dia": 70.2,
+        "cortisol_avg": 16.0,
+        "pleasure_hormone_avg": 71.5,
+        "health_index": 41.8,
+        "danger_dims": 2,
+        "risk_dims": 2
+      },
+      "danger_count": 2
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  },
+  {
+    "dna_root_id": "DNA-20260713-1251-001",
+    "timestamp": "2026-07-13T12:51:10",
+    "location_fingerprint": "office.深夜加班办公",
+    "snapshot_summary": {
+      "overall_health": "risk",
+      "vital_signs": {
+        "heart_rate": 87.2,
+        "blood_pressure_sys": 128.1,
+        "blood_pressure_dia": 66.0,
+        "cortisol_avg": 24.5,
+        "pleasure_hormone_avg": 68.5,
+        "health_index": 33.6,
+        "danger_dims": 3,
+        "risk_dims": 1
+      },
+      "danger_count": 7
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  },
+  {
+    "dna_root_id": "DNA-20260713-1251-001",
+    "timestamp": "2026-07-13T12:51:10",
+    "location_fingerprint": "unknown.默认场景",
+    "snapshot_summary": {
+      "overall_health": "sub_healthy",
+      "vital_signs": {
+        "heart_rate": 63.0,
+        "blood_pressure_sys": 119.0,
+        "blood_pressure_dia": 74.0,
+        "cortisol_avg": 12.0,
+        "pleasure_hormone_avg": 74.5,
+        "health_index": 56.3,
+        "danger_dims": 1,
+        "risk_dims": 1
+      },
+      "danger_count": 0
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  },
+  {
+    "dna_root_id": "DNA-20260713-1254-001",
+    "timestamp": "2026-07-13T12:54:18",
+    "location_fingerprint": "office.深夜加班办公",
+    "snapshot_summary": {
+      "overall_health": "sub_healthy",
+      "vital_signs": {
+        "heart_rate": 74.4,
+        "blood_pressure_sys": 126.5,
+        "blood_pressure_dia": 70.2,
+        "cortisol_avg": 16.0,
+        "pleasure_hormone_avg": 69.5,
+        "health_index": 60.0,
+        "danger_dims": 0,
+        "risk_dims": 3
+      },
+      "danger_count": 2
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  },
+  {
+    "dna_root_id": "DNA-20260713-1254-001",
+    "timestamp": "2026-07-13T12:54:18",
+    "location_fingerprint": "office.深夜加班办公",
+    "snapshot_summary": {
+      "overall_health": "sub_healthy",
+      "vital_signs": {
+        "heart_rate": 87.2,
+        "blood_pressure_sys": 128.1,
+        "blood_pressure_dia": 66.0,
+        "cortisol_avg": 24.5,
+        "pleasure_hormone_avg": 67.0,
+        "health_index": 48.8,
+        "danger_dims": 1,
+        "risk_dims": 3
+      },
+      "danger_count": 6
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  },
+  {
+    "dna_root_id": "DNA-20260713-1254-001",
+    "timestamp": "2026-07-13T12:54:18",
+    "location_fingerprint": "living_room.午后居家家庭陪伴",
+    "snapshot_summary": {
+      "overall_health": "sub_healthy",
+      "vital_signs": {
+        "heart_rate": 60.3,
+        "blood_pressure_sys": 116.3,
+        "blood_pressure_dia": 74.9,
+        "cortisol_avg": 9.8,
+        "pleasure_hormone_avg": 81.5,
+        "health_index": 46.8,
+        "danger_dims": 2,
+        "risk_dims": 0
+      },
+      "danger_count": 0
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  },
+  {
+    "dna_root_id": "DNA-20260713-1254-001",
+    "timestamp": "2026-07-13T12:54:18",
+    "location_fingerprint": "outdoor.午后户外社交活动",
+    "snapshot_summary": {
+      "overall_health": "sub_healthy",
+      "vital_signs": {
+        "heart_rate": 63.0,
+        "blood_pressure_sys": 117.4,
+        "blood_pressure_dia": 74.0,
+        "cortisol_avg": 9.0,
+        "pleasure_hormone_avg": 85.0,
+        "health_index": 46.2,
+        "danger_dims": 2,
+        "risk_dims": 0
+      },
+      "danger_count": 0
+    },
+    "protobuf_dict": {},
+    "yaoguang_source": "yaoguang_fallback",
+    "emission_attempted": false,
+    "emission_error": "",
+    "synced": false,
+    "synced_at": ""
+  }
+]

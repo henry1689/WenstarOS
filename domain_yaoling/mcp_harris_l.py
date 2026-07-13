@@ -135,6 +135,61 @@ async def query_global_memory(
     return json.dumps({"code": 0, "memory_result": {"result": []}}, ensure_ascii=False)
 
 
+@app.tool(name="run_closed_loop")
+async def yaoling_closed_loop(
+    raw_text: str,
+    dna_root_id: Optional[str] = None,
+    user_context: Optional[Dict] = None,
+) -> str:
+    """
+    瑶灵三体通信闭环 — 一键执行六步流程。
+
+    1. 解析用户消息提取场景参数
+    2. 瑶灵 32D 体感流水线
+    3. 瑶光客观参数获取 (不可用时默认兜底)
+    4. 双路数据整合
+    5. 太虚境天权上传 (不可用时本地缓存)
+    6. 格式化输出
+
+    Args:
+        raw_text: 用户消息原文
+        dna_root_id: DNA时序锚点 (不传自动生成)
+        user_context: 可选的额外上下文
+    """
+    try:
+        from closed_loop import run_closed_loop as _run_loop
+        from closed_loop import format_closed_loop_output
+
+        result = _run_loop(raw_text, dna_root_id=dna_root_id, user_context=user_context or {})
+        output = format_closed_loop_output(result)
+
+        return json.dumps(
+            {
+                "code": 0 if not result.pipeline_result.get("safety_reject") else -99,
+                "dna_root_id": result.dna_root_id,
+                "location_fingerprint": result.location_fingerprint,
+                "overall_health": result.overall_health,
+                "vital_signs": {
+                    "heart_rate": result.vital_signs.get("heart_rate", 0),
+                    "blood_pressure": f"{result.vital_signs.get('blood_pressure_sys',0):.0f}/{result.vital_signs.get('blood_pressure_dia',0):.0f}",
+                    "cortisol_avg": result.vital_signs.get("cortisol_avg", 0),
+                    "pleasure_hormone_avg": result.vital_signs.get("pleasure_hormone_avg", 0),
+                },
+                "danger_count": result.danger_count,
+                "tri_body": {
+                    "yaoling": "ok",
+                    "yaoguang": result.yaoguang_source,
+                    "tianquan": result.tianquan_status,
+                },
+                "errors": result.errors,
+                "formatted_output": output,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        return json.dumps({"code": -2, "error": str(e)}, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------

@@ -17,8 +17,10 @@ domain_yaoguang — 瑶光域 MCP 服务入口
 """
 
 import asyncio
+import json
 import sys
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 _PARENT = Path(__file__).resolve().parent.parent
 if str(_PARENT) not in sys.path:
@@ -26,6 +28,7 @@ if str(_PARENT) not in sys.path:
 
 from common.base_mcp_harris import BaseHarrisMCP, DomainConfig
 from harris_g_instance import harris_g_global
+from workflow_executor import YaoguangWorkflowExecutor
 
 # ---------------------------------------------------------------------------
 # 加载静态工作流 YAML
@@ -57,6 +60,150 @@ YAOGUANG_DYNAMIC_ALLOWLIST = [
 ]
 
 # ---------------------------------------------------------------------------
+# 瑶光域全局执行器
+# ---------------------------------------------------------------------------
+
+yaoguang_executor = YaoguangWorkflowExecutor()
+
+# ---------------------------------------------------------------------------
+# YaoguangMCP — 继承 BaseHarrisMCP，串联瑶光 32 通道执行器
+# ---------------------------------------------------------------------------
+
+
+class YaoguangMCP(BaseHarrisMCP):
+    """瑶光域 MCP — 在基类基础上重写 run_static_workflow，路由到 32 维客观通道。"""
+
+    def __init__(self, cfg: DomainConfig, harris_instance, executor: YaoguangWorkflowExecutor) -> None:
+        self._yaoguang = executor
+        super().__init__(cfg, harris_instance)
+        # 基类 _register_core_tools 已注册 run_static_workflow
+        # FastMCP 不允许同名覆盖，所以先移除基类版本，再注册瑶光版本
+        self.app._tool_manager._tools.pop("run_static_workflow", None)
+        self._register_yaoguang_override()
+
+    # ------------------------------------------------------------------
+    # 覆盖 run_static_workflow — 路由瑶光 workflow 到 32 通道执行器
+    # ------------------------------------------------------------------
+
+    def _register_yaoguang_override(self) -> None:
+        """重新注册 run_static_workflow，将瑶光 3 个 workflow 路由到真执行器。"""
+
+        _executor = self._yaoguang
+
+        @self.app.tool()
+        async def run_static_workflow(
+            workflow_id: str,
+            task: str,
+            constraints: Optional[Dict] = None,
+        ) -> str:
+            """瑶光域静态工作流执行 — 路由到 32 维客观通道计算。
+
+            支持的 workflow_id:
+              wf_objective_env_sample  — 6D 环境感知快照
+              wf_location_fingerprint  — 标准化区位指纹
+              wf_perception_filter     — 全 32 维客观参数快照
+              wf_emotion_sample        — 旧别名 (等同于 wf_objective_env_sample)
+            """
+            constraints = constraints or {}
+
+            # ── 路由: 瑶光专用 workflow → 32 通道执行器 ──
+            if workflow_id in ("wf_objective_env_sample", "wf_emotion_sample"):
+                try:
+                    loc = constraints.get("location_fingerprint", "")
+                    dn = constraints.get("dna_root_id", "YAOGUANG-" + str(hash(task))[:16])
+                    ts = constraints.get("timestamp_ms")
+                    env6 = _executor.run_env_sample(
+                        location_fingerprint=loc,
+                        dna_root_id=dn,
+                        timestamp_ms=ts,
+                        environmental_params=constraints.get("environmental_params"),
+                        temporal_context=constraints.get("temporal_context"),
+                        duration_context=constraints.get("duration_context"),
+                    )
+                    return json.dumps({
+                        "code": 0,
+                        "workflow_id": workflow_id,
+                        "env_6d": env6.to_dict(),
+                    }, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({"code": -2, "error": str(e), "workflow_id": workflow_id}, ensure_ascii=False)
+
+            elif workflow_id == "wf_location_fingerprint":
+                try:
+                    result = _executor.run_location_fingerprint(
+                        scene_context=constraints.get("scene_context", task),
+                        known_scene_id=constraints.get("known_scene_id", ""),
+                        known_sub_zone=constraints.get("known_sub_zone", ""),
+                    )
+                    return json.dumps({"code": 0, "workflow_id": workflow_id, **result}, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({"code": -2, "error": str(e), "workflow_id": workflow_id}, ensure_ascii=False)
+
+            elif workflow_id == "wf_perception_filter":
+                try:
+                    dn = constraints.get("dna_root_id", "")
+                    if not dn:
+                        return json.dumps(
+                            {"code": -1, "msg": "缺少 dna_root_id — 无全局锚点拒绝输出"},
+                            ensure_ascii=False,
+                        )
+                    loc = constraints.get("location_fingerprint", "")
+                    if not loc:
+                        return json.dumps(
+                            {"code": -1, "msg": "缺少 location_fingerprint — 无区位拒绝输出"},
+                            ensure_ascii=False,
+                        )
+                    snapshot = _executor.run_full_snapshot(
+                        dna_root_id=dn,
+                        location_fingerprint=loc,
+                        timestamp_ms=constraints.get("timestamp_ms"),
+                        environmental_params=constraints.get("environmental_params"),
+                        temporal_context=constraints.get("temporal_context"),
+                        duration_context=constraints.get("duration_context"),
+                        interpersonal_labels=constraints.get("interpersonal_labels"),
+                        activity_context=constraints.get("activity_context"),
+                    )
+                    return json.dumps({
+                        "code": 0,
+                        "workflow_id": workflow_id,
+                        "snapshot": snapshot.to_dict(),
+                    }, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({"code": -2, "error": str(e), "workflow_id": workflow_id}, ensure_ascii=False)
+
+            elif workflow_id == "wf_world_unlock":
+                try:
+                    from unlock_dispatcher import handle_unlock_event
+                    result = handle_unlock_event(
+                        event_type=constraints.get("event_type", "custom"),
+                        dna_root_id=constraints.get("dna_root_id", "YAOGUANG-" + str(hash(task))[:16]),
+                        event_description=task,
+                        location_fingerprint=constraints.get("location_fingerprint", ""),
+                        scene_type=constraints.get("scene_type", "home"),
+                        time_of_day=constraints.get("time_of_day", "afternoon"),
+                        hour=constraints.get("hour", 14),
+                        weather=constraints.get("weather", "clear"),
+                        season=constraints.get("season", "summer"),
+                        outdoor_temp_c=constraints.get("outdoor_temp_c", 28.0),
+                        day_type=constraints.get("day_type", "workday"),
+                        crowd_density=constraints.get("crowd_density", 0.1),
+                        noise_db_override=constraints.get("noise_db_override"),
+                        interpersonal_labels=constraints.get("interpersonal_labels", []),
+                        activity_context=constraints.get("activity_context"),
+                        extra_params=constraints.get("extra_params", {}),
+                    )
+                    return json.dumps(result, ensure_ascii=False)
+                except Exception as e:
+                    return json.dumps({"code": -2, "error": str(e), "workflow_id": workflow_id}, ensure_ascii=False)
+
+            else:
+                return json.dumps(
+                    {"code": -1, "msg": f"未知工作流: {workflow_id}，瑶光域可用: wf_objective_env_sample | wf_location_fingerprint | wf_perception_filter | wf_emotion_sample"},
+                    ensure_ascii=False,
+                )
+
+
+# ---------------------------------------------------------------------------
 # 瑶光域配置
 # ---------------------------------------------------------------------------
 
@@ -86,7 +233,7 @@ yaoguang_config = DomainConfig(
 
 
 async def main() -> None:
-    bridge = BaseHarrisMCP(yaoguang_config, harris_g_global)
+    bridge = YaoguangMCP(yaoguang_config, harris_g_global, yaoguang_executor)
     await bridge.start_stdio()
 
 
